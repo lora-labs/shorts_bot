@@ -1,0 +1,110 @@
+{
+  "1": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": { "ckpt_name": "ltx-video-2b-v0.9.safetensors" },
+    "_meta": { "title": "Load LTX checkpoint" }
+  },
+  "2": {
+    "class_type": "LoadImage",
+    "inputs": { "image": "__INPUT_IMAGE__" },
+    "_meta": { "title": "Load keyframe image" }
+  },
+  "3": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "__VIDEO_POSITIVE__",
+      "clip": ["1", 1]
+    },
+    "_meta": { "title": "Video positive prompt" }
+  },
+  "4": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "__VIDEO_NEGATIVE__",
+      "clip": ["1", 1]
+    },
+    "_meta": { "title": "Video negative prompt" }
+  },
+  "5": {
+    "class_type": "LTXVConditioning",
+    "inputs": {
+      "positive": ["3", 0],
+      "negative": ["4", 0],
+      "frame_rate": 25.0
+    },
+    "_meta": { "title": "LTX conditioning" }
+  },
+  "6": {
+    "class_type": "LTXVImgToVideo",
+    "inputs": {
+      "positive": ["5", 0],
+      "negative": ["5", 1],
+      "vae": ["1", 2],
+      "image": ["2", 0],
+      "width": 768,
+      "height": 512,
+      "length": 97,
+      "batch_size": 1,
+      "strength": 1.0
+    },
+    "_meta": { "title": "LTX img-to-video" }
+  },
+  "7": {
+    "class_type": "LTXVScheduler",
+    "inputs": {
+      "steps": 30,
+      "max_shift": 2.05,
+      "base_shift": 0.95,
+      "stretch": true,
+      "terminal": 0.1,
+      "latent": ["6", 2]
+    },
+    "_meta": { "title": "LTX scheduler" }
+  },
+  "8": {
+    "class_type": "KSamplerSelect",
+    "inputs": { "sampler_name": "euler" },
+    "_meta": { "title": "Sampler select" }
+  },
+  "9": {
+    "class_type": "SamplerCustom",
+    "inputs": {
+      "add_noise": true,
+      "noise_seed": 0,
+      "cfg": 3.0,
+      "model": ["1", 0],
+      "positive": ["6", 0],
+      "negative": ["6", 1],
+      "sampler": ["8", 0],
+      "sigmas": ["7", 0],
+      "latent_image": ["6", 2]
+    },
+    "_meta": { "title": "Sample video latent" }
+  },
+  "10": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": ["9", 0],
+      "vae": ["1", 2]
+    },
+    "_meta": { "title": "Decode frames" }
+  },
+  "11": {
+    "class_type": "CreateVideo",
+    "inputs": {
+      "images": ["10", 0],
+      "fps": 25.0
+    },
+    "_meta": { "title": "Create video from frames" }
+  },
+  "12": {
+    "class_type": "SaveVideo",
+    "inputs": {
+      "video": ["11", 0],
+      "filename_prefix": "scene_video",
+      "format": "mp4",
+      "codec": "h264"
+    },
+    "_meta": { "title": "Save scene video" }
+  }
+}
