@@ -74,7 +74,9 @@ class PipelineConfig:
     video_steps: int = 15
     video_cfg: float = 1.0
 
-    script_timeout: float = 600.0
+    # Scenario workflow can take 15+ min when Qwen runs on CPU (default on
+    # low-VRAM setups). 30 min default gives headroom for that + reasoning.
+    script_timeout: float = 1800.0
     scene_timeout: float = 1800.0
 
     seed: int | None = None

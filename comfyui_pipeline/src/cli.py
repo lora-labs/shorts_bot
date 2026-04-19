@@ -66,6 +66,26 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--video-fps", type=float, default=_DEFAULTS.video_fps)
     parser.add_argument(
+        "--script-timeout",
+        type=float,
+        default=_DEFAULTS.script_timeout,
+        help=(
+            "Max seconds to wait for the Qwen scenario workflow (default: "
+            "%(default)s). Bump higher if running Qwen on CPU — an 8B model "
+            "can easily take 15+ min per scenario on CPU."
+        ),
+    )
+    parser.add_argument(
+        "--scene-timeout",
+        type=float,
+        default=_DEFAULTS.scene_timeout,
+        help=(
+            "Max seconds per scene workflow (image+video) (default: "
+            "%(default)s). LTX-2.3 22B on a 4070 with --lowvram can take "
+            "20-40 min per scene."
+        ),
+    )
+    parser.add_argument(
         "-v", "--verbose", action="store_true", help="Enable debug logging"
     )
     return parser.parse_args(argv)
@@ -90,6 +110,8 @@ def main(argv: list[str] | None = None) -> int:
         ltx_text_encoder=args.ltx_text_encoder,
         seed=args.seed,
         video_fps=args.video_fps,
+        script_timeout=args.script_timeout,
+        scene_timeout=args.scene_timeout,
     )
     pipeline = ScenePipeline(cfg)
     result = pipeline.run(args.idea)
