@@ -3,3 +3,10 @@ websocket-client>=1.7
 pydantic>=2.6
 gradio>=4.44
 python-telegram-bot>=21.0
+
+# Required by the QwenScenarioGenerator custom node. The node is imported from
+# inside ComfyUI's Python, so these must be available in whatever interpreter
+# runs ComfyUI — not just in the orchestrator's venv.
+transformers>=4.51
+accelerate>=0.33
+safetensors>=0.4
