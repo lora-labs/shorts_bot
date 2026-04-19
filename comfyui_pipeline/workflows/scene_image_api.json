@@ -26,14 +26,17 @@
     "_meta": { "title": "Negative prompt" }
   },
   "5": {
-    "class_type": "KSampler",
+    "class_type": "KSamplerAdvanced",
     "inputs": {
-      "seed": 0,
+      "add_noise": "enable",
+      "noise_seed": 0,
       "steps": 28,
       "cfg": 6.5,
       "sampler_name": "dpmpp_2m",
       "scheduler": "karras",
-      "denoise": 1.0,
+      "start_at_step": 0,
+      "end_at_step": 10000,
+      "return_with_leftover_noise": "disable",
       "model": ["1", 0],
       "positive": ["3", 0],
       "negative": ["4", 0],

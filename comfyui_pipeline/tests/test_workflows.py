@@ -48,3 +48,35 @@ def test_script_workflow_has_qwen_and_save_nodes() -> None:
     class_types = {node["class_type"] for node in data.values()}
     assert "QwenScenarioGenerator" in class_types
     assert "SaveTextToFile" in class_types
+
+
+def test_scene_image_workflow_uses_ksampler_advanced() -> None:
+    data = json.loads((WORKFLOW_DIR / "scene_image_api.json").read_text(encoding="utf-8"))
+    class_types = {node["class_type"] for node in data.values()}
+    assert "KSamplerAdvanced" in class_types
+    assert "KSampler" not in class_types, (
+        "scene_image_api.json must use KSamplerAdvanced, not the basic KSampler"
+    )
+
+
+def test_scene_video_workflow_is_ltx_2_3() -> None:
+    data = json.loads((WORKFLOW_DIR / "scene_video_api.json").read_text(encoding="utf-8"))
+    class_types = {node["class_type"] for node in data.values()}
+    # LTX-2.3 single-stage I2V chain
+    for expected in (
+        "LTXAVTextEncoderLoader",
+        "LTXVConditioning",
+        "EmptyLTXVLatentVideo",
+        "LTXVImgToVideoConditionOnly",
+        "LTXVScheduler",
+        "KSamplerSelect",
+        "RandomNoise",
+        "CFGGuider",
+        "SamplerCustomAdvanced",
+        "CreateVideo",
+        "SaveVideo",
+    ):
+        assert expected in class_types, f"scene_video_api.json must contain {expected}"
+    # Old LTX-2.0 nodes must be gone.
+    assert "SamplerCustom" not in class_types
+    assert "LTXVImgToVideo" not in class_types

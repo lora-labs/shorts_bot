@@ -23,6 +23,7 @@ import logging
 import random
 import re
 import shutil
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -46,26 +47,33 @@ class PipelineConfig:
     comfyui_url: str = "http://127.0.0.1:8188"
     output_dir: Path = Path("output/scenes")
     sdxl_checkpoint: str = "sd_xl_base_1.0.safetensors"
-    ltx_checkpoint: str = "ltx-video-2b-v0.9.safetensors"
-    qwen_model: str = "Qwen/Qwen2.5-7B-Instruct"
+    ltx_checkpoint: str = "ltx-2.3-22b-distilled-1.1.safetensors"
+    ltx_lora: str = "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
+    ltx_lora_strength: float = 1.0
+    ltx_text_encoder: str = "comfy_gemma_3_12B_it.safetensors"
+    qwen_model: str = "Qwen/Qwen3-8B"
 
     image_width: int = 1024
     image_height: int = 576
-    video_width: int = 768
-    video_height: int = 512
-    video_length_frames: int = 97
+    video_width: int = 960
+    video_height: int = 544
+    video_length_frames: int = 121
     video_fps: float = 25.0
 
     image_steps: int = 28
     image_cfg: float = 6.5
-    video_steps: int = 30
-    video_cfg: float = 3.0
+    video_steps: int = 15
+    video_cfg: float = 1.0
 
     script_timeout: float = 600.0
     scene_timeout: float = 1800.0
 
     seed: int | None = None
     max_script_retries: int = 1
+
+    # Final step: concatenate per-scene mp4 files into one movie via ffmpeg.
+    concat_final_video: bool = True
+    ffmpeg_binary: str = "ffmpeg"
 
 
 @dataclass
@@ -80,6 +88,7 @@ class PipelineResult:
     scenario: Scenario
     output_dir: Path
     scene_artifacts: list[SceneArtifacts] = field(default_factory=list)
+    final_video_path: Path | None = None
 
 
 class PipelineError(RuntimeError):
@@ -195,8 +204,9 @@ class ScenePipeline:
         wf[pos_id]["inputs"]["text"] = full_prompt
         wf[neg_id]["inputs"]["text"] = scene.negative_prompt
 
-        wf[sampler_id]["inputs"]["seed"] = seed
+        wf[sampler_id]["inputs"]["noise_seed"] = seed
         wf[sampler_id]["inputs"]["steps"] = self.config.image_steps
+        wf[sampler_id]["inputs"]["end_at_step"] = max(self.config.image_steps, 10000)
         wf[sampler_id]["inputs"]["cfg"] = self.config.image_cfg
         wf[save_id]["inputs"]["filename_prefix"] = f"scene_{scene.id:02d}_image"
         return wf
@@ -239,17 +249,24 @@ class ScenePipeline:
     ) -> dict[str, Any]:
         wf = copy.deepcopy(_load_workflow("scene_video_api.json"))
         ckpt_id = _find_node_by_title(wf, "Load LTX checkpoint")
+        enc_id = _find_node_by_title(wf, "LTX text encoder")
+        lora_id = _find_node_by_title(wf, "Apply LTX distilled LoRA")
         image_id = _find_node_by_title(wf, "Load keyframe image")
         pos_id = _find_node_by_title(wf, "Video positive prompt")
         neg_id = _find_node_by_title(wf, "Video negative prompt")
         cond_id = _find_node_by_title(wf, "LTX conditioning")
-        i2v_id = _find_node_by_title(wf, "LTX img-to-video")
+        latent_id = _find_node_by_title(wf, "LTX empty latent")
         sched_id = _find_node_by_title(wf, "LTX scheduler")
-        sampler_id = _find_node_by_title(wf, "Sample video latent")
+        noise_id = _find_node_by_title(wf, "Random noise")
+        guider_id = _find_node_by_title(wf, "CFG guider")
         create_id = _find_node_by_title(wf, "Create video from frames")
         save_id = _find_node_by_title(wf, "Save scene video")
 
         wf[ckpt_id]["inputs"]["ckpt_name"] = self.config.ltx_checkpoint
+        wf[enc_id]["inputs"]["text_encoder"] = self.config.ltx_text_encoder
+        wf[enc_id]["inputs"]["ckpt_name"] = self.config.ltx_checkpoint
+        wf[lora_id]["inputs"]["lora_name"] = self.config.ltx_lora
+        wf[lora_id]["inputs"]["strength_model"] = self.config.ltx_lora_strength
         wf[image_id]["inputs"]["image"] = input_image_name
 
         full_prompt = scene.video_prompt
@@ -259,12 +276,12 @@ class ScenePipeline:
         wf[neg_id]["inputs"]["text"] = scene.negative_prompt
 
         wf[cond_id]["inputs"]["frame_rate"] = self.config.video_fps
-        wf[i2v_id]["inputs"]["width"] = self.config.video_width
-        wf[i2v_id]["inputs"]["height"] = self.config.video_height
-        wf[i2v_id]["inputs"]["length"] = self._frames_for_duration(scene.duration_seconds)
+        wf[latent_id]["inputs"]["width"] = self.config.video_width
+        wf[latent_id]["inputs"]["height"] = self.config.video_height
+        wf[latent_id]["inputs"]["length"] = self._frames_for_duration(scene.duration_seconds)
         wf[sched_id]["inputs"]["steps"] = self.config.video_steps
-        wf[sampler_id]["inputs"]["noise_seed"] = seed
-        wf[sampler_id]["inputs"]["cfg"] = self.config.video_cfg
+        wf[noise_id]["inputs"]["noise_seed"] = seed
+        wf[guider_id]["inputs"]["cfg"] = self.config.video_cfg
         wf[create_id]["inputs"]["fps"] = self.config.video_fps
         wf[save_id]["inputs"]["filename_prefix"] = f"scene_{scene.id:02d}_video"
         return wf
@@ -337,8 +354,60 @@ class ScenePipeline:
         (self.config.output_dir / "index.json").write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+
+        if self.config.concat_final_video and result.scene_artifacts:
+            try:
+                result.final_video_path = self._concat_final_video(result)
+                log.info("Final video concatenated: %s", result.final_video_path)
+            except Exception as exc:  # noqa: BLE001 - concat is best-effort
+                log.warning("Final video concatenation failed: %s", exc)
+
         log.info("=== ScenePipeline done → %s ===", self.config.output_dir)
         return result
+
+    # ---------- Stage 4: ffmpeg concat ----------
+
+    def _concat_final_video(self, result: PipelineResult) -> Path:
+        if not shutil.which(self.config.ffmpeg_binary):
+            raise PipelineError(
+                f"ffmpeg binary {self.config.ffmpeg_binary!r} not found in PATH"
+            )
+        if not result.scene_artifacts:
+            raise PipelineError("no scenes to concatenate")
+
+        list_path = self.config.output_dir / "concat_list.txt"
+        with list_path.open("w", encoding="utf-8") as fh:
+            for sa in result.scene_artifacts:
+                escaped = str(sa.video_path.resolve()).replace("'", "'\\''")
+                fh.write(f"file '{escaped}'\n")
+        final_path = self.config.output_dir / "final.mp4"
+        cmd = [
+            self.config.ffmpeg_binary, "-y",
+            "-f", "concat", "-safe", "0",
+            "-i", str(list_path),
+            "-c", "copy",
+            str(final_path),
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            log.warning(
+                "ffmpeg stream-copy concat failed (rc=%s), re-encoding. stderr tail: %s",
+                proc.returncode, proc.stderr[-500:],
+            )
+            cmd_enc = [
+                self.config.ffmpeg_binary, "-y",
+                "-f", "concat", "-safe", "0",
+                "-i", str(list_path),
+                "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                "-preset", "medium", "-crf", "18",
+                str(final_path),
+            ]
+            proc = subprocess.run(cmd_enc, capture_output=True, text=True)
+            if proc.returncode != 0:
+                raise PipelineError(
+                    f"ffmpeg concat failed (rc={proc.returncode}): {proc.stderr[-500:]}"
+                )
+        return final_path
 
 
 __all__ = ["PipelineConfig", "PipelineResult", "SceneArtifacts", "ScenePipeline", "PipelineError"]
