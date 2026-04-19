@@ -40,13 +40,27 @@ class ComfyClient:
         self._ws_url = f"{ws_scheme}://{parsed.netloc}/ws?clientId={self.client_id}"
 
     def queue_prompt(self, workflow: dict[str, Any]) -> str:
-        """POST the workflow (API format) to /prompt and return the prompt_id."""
+        """POST the workflow (API format) to /prompt and return the prompt_id.
+
+        On validation failure ComfyUI returns HTTP 400 with a JSON body that
+        lists the offending node and input. We surface that body in the raised
+        exception so the CLI log tells the user exactly which node was
+        rejected, instead of just ``HTTPError: 400 Client Error``.
+        """
         resp = requests.post(
             f"{self.base_url}/prompt",
             json={"prompt": workflow, "client_id": self.client_id},
             timeout=30,
         )
-        resp.raise_for_status()
+        if not resp.ok:
+            try:
+                body_text = json.dumps(resp.json(), ensure_ascii=False)
+            except ValueError:
+                body_text = resp.text
+            log.error("ComfyUI /prompt rejected workflow (%s): %s", resp.status_code, body_text)
+            raise RuntimeError(
+                f"ComfyUI /prompt returned {resp.status_code}: {body_text}"
+            )
         data = resp.json()
         if "prompt_id" not in data:
             raise RuntimeError(f"ComfyUI did not return prompt_id: {data}")
