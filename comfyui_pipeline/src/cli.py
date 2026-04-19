@@ -35,6 +35,30 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=Path(os.environ.get("SCENE_OUTPUT_DIR", str(_DEFAULTS.output_dir))),
     )
     parser.add_argument("--qwen-model", default=_DEFAULTS.qwen_model)
+    parser.add_argument(
+        "--qwen-device",
+        choices=("auto", "cuda", "cpu"),
+        default=_DEFAULTS.qwen_device,
+        help=(
+            "Where Qwen runs. 'auto' lets accelerate split layers across "
+            "CPU+GPU (recommended for <16 GB VRAM); 'cpu' forces CPU (safest "
+            "on 12 GB cards, ~1-2 min per scenario); 'cuda' pins to GPU."
+        ),
+    )
+    qwen_keep = parser.add_mutually_exclusive_group()
+    qwen_keep.add_argument(
+        "--keep-qwen-loaded",
+        dest="qwen_keep_loaded",
+        action="store_true",
+        help="Keep Qwen resident in memory between runs (fast, needs >=32 GB RAM).",
+    )
+    qwen_keep.add_argument(
+        "--no-keep-qwen-loaded",
+        dest="qwen_keep_loaded",
+        action="store_false",
+        help="Unload Qwen after each scenario (default — frees RAM/VRAM for SDXL+LTX).",
+    )
+    parser.set_defaults(qwen_keep_loaded=_DEFAULTS.qwen_keep_loaded)
     parser.add_argument("--sdxl-checkpoint", default=_DEFAULTS.sdxl_checkpoint)
     parser.add_argument("--ltx-checkpoint", default=_DEFAULTS.ltx_checkpoint)
     parser.add_argument("--ltx-lora", default=_DEFAULTS.ltx_lora)
@@ -58,6 +82,8 @@ def main(argv: list[str] | None = None) -> int:
         comfyui_url=args.comfyui_url,
         output_dir=args.output_dir,
         qwen_model=args.qwen_model,
+        qwen_device=args.qwen_device,
+        qwen_keep_loaded=args.qwen_keep_loaded,
         sdxl_checkpoint=args.sdxl_checkpoint,
         ltx_checkpoint=args.ltx_checkpoint,
         ltx_lora=args.ltx_lora,

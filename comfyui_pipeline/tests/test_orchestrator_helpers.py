@@ -105,14 +105,29 @@ def test_build_video_workflow_wires_ltx23_nodes(tmp_path) -> None:
 
 
 def test_build_script_workflow_round_trips(tmp_path) -> None:
-    cfg = PipelineConfig(output_dir=tmp_path, qwen_model="Qwen/Qwen3-8B")
+    cfg = PipelineConfig(
+        output_dir=tmp_path,
+        qwen_model="Qwen/Qwen3-8B",
+        qwen_device="cpu",
+        qwen_keep_loaded=False,
+    )
     pipeline = ScenePipeline(cfg)
     wf = pipeline._build_script_workflow("a cat surfs", "you are a director", seed=7)
     qwen = wf[orch._find_node_by_title(wf, "Qwen scenario generator")]["inputs"]
     assert qwen["model_name_or_path"] == "Qwen/Qwen3-8B"
     assert qwen["seed"] == 7
+    assert qwen["device"] == "cpu"
+    assert qwen["keep_loaded"] is False
     # The workflow must still be JSON-serialisable after patching.
     json.dumps(wf)
+
+
+def test_pipeline_config_defaults_are_low_vram_friendly() -> None:
+    """Defaults should work on 12 GB GPUs out of the box: Qwen splits across
+    CPU+GPU via accelerate and unloads itself before SDXL/LTX run."""
+    cfg = PipelineConfig()
+    assert cfg.qwen_device == "auto"
+    assert cfg.qwen_keep_loaded is False
 
 
 def test_concat_final_video_invokes_ffmpeg(tmp_path, monkeypatch) -> None:

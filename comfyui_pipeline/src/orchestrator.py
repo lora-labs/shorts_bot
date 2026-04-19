@@ -52,6 +52,15 @@ class PipelineConfig:
     ltx_lora_strength: float = 1.0
     ltx_text_encoder: str = "comfy_gemma_3_12B_it.safetensors"
     qwen_model: str = "Qwen/Qwen3-8B"
+    # Where the Qwen LLM runs. On low-VRAM cards (e.g. RTX 4070 12 GB) the
+    # 8B model in fp16 does not fit alongside SDXL/LTX; use "cpu" to generate
+    # the scenario on CPU (~1-2 min) and keep the GPU free for diffusion,
+    # or "auto" to let accelerate split layers across CPU+GPU.
+    qwen_device: str = "auto"
+    # Whether the Qwen node keeps the model resident in memory after
+    # generating the scenario. Default False so VRAM/RAM is released for
+    # the following SDXL + LTX stages.
+    qwen_keep_loaded: bool = False
 
     image_width: int = 1024
     image_height: int = 576
@@ -144,6 +153,8 @@ class ScenePipeline:
         wf[sys_id]["inputs"]["value"] = system_prompt
         wf[user_id]["inputs"]["value"] = idea
         wf[qwen_id]["inputs"]["model_name_or_path"] = self.config.qwen_model
+        wf[qwen_id]["inputs"]["device"] = self.config.qwen_device
+        wf[qwen_id]["inputs"]["keep_loaded"] = self.config.qwen_keep_loaded
         wf[qwen_id]["inputs"]["seed"] = seed
         return wf
 

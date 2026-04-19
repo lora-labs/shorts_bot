@@ -77,6 +77,16 @@ Qwen3-8B is pulled on first run via `transformers` (defaults to
 `PipelineConfig.qwen_model=` (e.g. a local path, or `Qwen/Qwen3-14B` if you
 have the VRAM).
 
+On low-VRAM GPUs (e.g. RTX 4070 12 GB) Qwen3-8B in fp16 (~16 GB) does not
+fit on the GPU alongside SDXL/LTX. Defaults are tuned for that:
+
+- `--qwen-device auto` (default) lets `accelerate` split layers across
+  CPU+GPU automatically. Use `--qwen-device cpu` to force CPU (safest,
+  ~1-2 min per scenario) or `--qwen-device cuda` if you have ≥24 GB VRAM.
+- `--no-keep-qwen-loaded` (default) unloads Qwen after each scenario so
+  SDXL/LTX have the full VRAM to themselves. Use `--keep-qwen-loaded` if
+  you generate many videos in a row and have ≥32 GB system RAM.
+
 ## Install
 
 ### 1. Custom nodes into ComfyUI
@@ -267,6 +277,8 @@ Common knobs on `PipelineConfig`:
 | Field | Default | Notes |
 | --- | --- | --- |
 | `qwen_model` | `Qwen/Qwen3-8B` | HF ID or local path |
+| `qwen_device` | `"auto"` | `"auto"` → accelerate CPU+GPU split; `"cpu"` forces CPU (low-VRAM safe); `"cuda"` pins to GPU |
+| `qwen_keep_loaded` | `False` | Keep Qwen resident after scenario (disable on low-VRAM so SDXL/LTX have VRAM) |
 | `sdxl_checkpoint` | `sd_xl_base_1.0.safetensors` | Any SDXL checkpoint |
 | `ltx_checkpoint` | `ltx-2.3-22b-distilled-1.1.safetensors` | LTX-2.3 distilled |
 | `ltx_lora` | `ltx-2.3-22b-distilled-lora-384-1.1.safetensors` | Distilled LoRA |
