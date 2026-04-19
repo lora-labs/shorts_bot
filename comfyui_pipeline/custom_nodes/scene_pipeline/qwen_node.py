@@ -40,16 +40,31 @@ def _load_model(model_name_or_path: str, device: str, dtype: str):
     else:
         raise ValueError(f"Unsupported dtype: {dtype}")
 
-    resolved_device = device
-    if resolved_device == "auto":
+    # device_map controls how transformers/accelerate places layers.
+    # resolved_device is where we put tokenizer outputs (the model's entry
+    # device). When device_map="auto" accelerate inserts hooks that move
+    # tensors between devices, so feeding inputs to the GPU is safe.
+    if device == "auto":
+        device_map: Any = "auto"
         resolved_device = "cuda" if torch.cuda.is_available() else "cpu"
+    elif device == "cuda":
+        device_map = "cuda"
+        resolved_device = "cuda"
+    elif device == "cpu":
+        device_map = "cpu"
+        resolved_device = "cpu"
+    else:
+        raise ValueError(f"Unsupported device: {device}")
 
-    log.info("Loading Qwen model %s on %s (dtype=%s)", model_name_or_path, resolved_device, dtype)
+    log.info(
+        "Loading Qwen model %s on %s (device_map=%s, dtype=%s)",
+        model_name_or_path, resolved_device, device_map, dtype,
+    )
     tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
         model_name_or_path,
         torch_dtype=torch_dtype,
-        device_map=resolved_device if resolved_device != "auto" else "auto",
+        device_map=device_map,
         trust_remote_code=True,
     )
     model.eval()
