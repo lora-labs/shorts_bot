@@ -1,0 +1,40 @@
+{
+  "1": {
+    "class_type": "PrimitiveStringMultiline",
+    "inputs": {
+      "value": "__SYSTEM_PROMPT__"
+    },
+    "_meta": { "title": "System prompt" }
+  },
+  "2": {
+    "class_type": "PrimitiveStringMultiline",
+    "inputs": {
+      "value": "__USER_IDEA__"
+    },
+    "_meta": { "title": "User idea" }
+  },
+  "3": {
+    "class_type": "QwenScenarioGenerator",
+    "inputs": {
+      "model_name_or_path": "Qwen/Qwen2.5-7B-Instruct",
+      "system_prompt": ["1", 0],
+      "user_prompt": ["2", 0],
+      "max_new_tokens": 2048,
+      "temperature": 0.7,
+      "top_p": 0.9,
+      "seed": 0,
+      "device": "auto",
+      "dtype": "auto",
+      "keep_loaded": true
+    },
+    "_meta": { "title": "Qwen scenario generator" }
+  },
+  "4": {
+    "class_type": "SaveTextToFile",
+    "inputs": {
+      "text": ["3", 0],
+      "filename_prefix": "scenario"
+    },
+    "_meta": { "title": "Save scenario JSON" }
+  }
+}
