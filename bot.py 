@@ -1,106 +1,204 @@
-import os
+"""Telegram bot entry point.
+
+Flow
+----
+1. User sends /start and then describes the video idea.
+2. :func:`generate_video` hands the idea to :class:`ScenePipeline`
+   (Qwen -> SDXL -> LTX-2.3) and waits for the finished ``final.mp4``.
+3. The bot tries to send the file directly; if it is too big for the
+   Telegram Bot API (or Telegram rejects it) it falls back to uploading
+   the file to Google Drive and returning a public link.
+
+Required environment
+--------------------
+* ``TELEGRAM_BOT_TOKEN`` — bot token from @BotFather.
+* ``COMFYUI_URL`` (optional, default ``http://127.0.0.1:8188``).
+* ``GOOGLE_APPLICATION_CREDENTIALS`` / ``credentials.json`` — only needed
+  for the Google Drive fallback; the bot runs fine without it.
+"""
+from __future__ import annotations
+
 import asyncio
+import logging
+import os
+from pathlib import Path
+
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ConversationHandler, ContextTypes
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+    ConversationHandler,
+    MessageHandler,
+    filters,
+)
 
-# Ваш API ключ Telegram
-API_KEY = 'ВАШ_ТОКЕН_ТЕЛЕГРАМ'
+from comfyui_pipeline.src.orchestrator import (
+    PipelineConfig,
+    PipelineError,
+    ScenePipeline,
+)
 
-# Путь к файлу с Google API credentials
-CREDENTIALS_FILE = 'credentials.json'
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+log = logging.getLogger("shorts_bot")
 
-# ID папки или настройка для создания файла в корне
-# Можно оставить пустым, чтобы создавать в корне
-DRIVE_FOLDER_ID = None  # или вставьте ваш ID папки
+API_KEY = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+COMFYUI_URL = os.environ.get("COMFYUI_URL", "http://127.0.0.1:8188")
+OUTPUT_DIR = Path(os.environ.get("BOT_OUTPUT_DIR", "output/bot_videos"))
+CREDENTIALS_FILE = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "credentials.json")
+DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID") or None
+TELEGRAM_MAX_UPLOAD_MB = 50  # Telegram Bot API hard limit for outgoing files.
 
-# Этапы диалога
 ASK_VIDEO_TYPE, GENERATE_VIDEO = range(2)
 
-# Настройка Google Drive API
-credentials = service_account.Credentials.from_service_account_file(
-    CREDENTIALS_FILE,
-    scopes=['https://www.googleapis.com/auth/drive.file']
-)
-drive_service = build('drive', 'v3', credentials=credentials)
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Привет! Я помогу создать видео для TikTok. Опиши, какое видео ты хочешь.")
+# --------------------------------------------------------------------------- #
+# Google Drive helper (optional fallback)
+# --------------------------------------------------------------------------- #
+
+
+def _drive_service():
+    """Lazily build a Drive service if credentials.json is present."""
+    if not Path(CREDENTIALS_FILE).is_file():
+        return None
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+
+    credentials = service_account.Credentials.from_service_account_file(
+        CREDENTIALS_FILE,
+        scopes=["https://www.googleapis.com/auth/drive.file"],
+    )
+    return build("drive", "v3", credentials=credentials)
+
+
+def upload_file_to_drive(file_path: Path) -> str:
+    svc = _drive_service()
+    if svc is None:
+        raise RuntimeError(
+            "Google Drive credentials not configured; set GOOGLE_APPLICATION_CREDENTIALS "
+            "or place credentials.json next to bot.py to enable the fallback upload."
+        )
+    from googleapiclient.http import MediaFileUpload
+
+    metadata: dict[str, object] = {"name": file_path.name}
+    if DRIVE_FOLDER_ID:
+        metadata["parents"] = [DRIVE_FOLDER_ID]
+    media = MediaFileUpload(str(file_path), resumable=True)
+    created = svc.files().create(body=metadata, media_body=media, fields="id").execute()
+    svc.permissions().create(
+        fileId=created["id"],
+        body={"type": "anyone", "role": "reader"},
+    ).execute()
+    return f"https://drive.google.com/uc?id={created['id']}&export=download"
+
+
+# --------------------------------------------------------------------------- #
+# ComfyUI pipeline wrapper
+# --------------------------------------------------------------------------- #
+
+
+async def generate_video(prompt_text: str, request_id: str | int = 0) -> Path:
+    """Run the end-to-end ScenePipeline and return the final mp4 path.
+
+    The blocking pipeline runs in a thread so the event loop stays responsive.
+    """
+    run_dir = OUTPUT_DIR / f"run_{request_id}"
+    config = PipelineConfig(comfyui_url=COMFYUI_URL, output_dir=run_dir)
+
+    def _run() -> Path:
+        pipeline = ScenePipeline(config)
+        result = pipeline.run(prompt_text)
+        if result.final_video_path is None:
+            raise PipelineError(
+                "Pipeline finished but no final video was produced; "
+                "check ffmpeg availability and per-scene artifacts."
+            )
+        return result.final_video_path
+
+    return await asyncio.to_thread(_run)
+
+
+# --------------------------------------------------------------------------- #
+# Telegram handlers
+# --------------------------------------------------------------------------- #
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text(
+        "Привет! Опиши идею видео для TikTok — я сгенерирую сценарий, "
+        "отрендерю ключевые кадры, оживлю их в LTX-2.3 и пришлю готовое видео."
+    )
     return ASK_VIDEO_TYPE
 
-async def ask_video_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_text = update.message.text
-    context.user_data['prompt'] = user_text
-    await update.message.reply_text(f"Понял, создаю видео по запросу: {user_text}\nПодожди немного, я подготовлю видео...")
 
-    # Генерируем видео
-    video_path = await generate_video(user_text)
-    
-    # Загружаем в Google Drive
-    file_url = upload_file_to_drive(video_path)
-    
-    # Отправляем ссылку
-    await update.message.reply_text(f"Готово! Вот ваше видео: {file_url}")
-    
-    # Можно удалить локальный файл, если нужно
-    os.remove(video_path)
-    
+async def ask_video_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_text = update.message.text or ""
+    context.user_data["prompt"] = user_text
+    await update.message.reply_text(
+        "Принято. Генерирую сценарий, кадры и видео — это может занять несколько минут."
+    )
+
+    try:
+        video_path = await generate_video(user_text, request_id=update.effective_chat.id)
+    except PipelineError as exc:
+        await update.message.reply_text(f"Ошибка генерации: {exc}")
+        return ConversationHandler.END
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Unhandled pipeline error")
+        await update.message.reply_text(f"Неожиданная ошибка: {exc}")
+        return ConversationHandler.END
+
+    size_mb = video_path.stat().st_size / (1024 * 1024)
+    try:
+        if size_mb <= TELEGRAM_MAX_UPLOAD_MB:
+            await update.message.reply_video(video=video_path.open("rb"))
+        else:
+            raise RuntimeError(
+                f"video {size_mb:.1f} MB > Telegram limit, uploading to Drive"
+            )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Direct video send failed, falling back to Drive: %s", exc)
+        try:
+            url = upload_file_to_drive(video_path)
+            await update.message.reply_text(f"Готово! Видео: {url}")
+        except Exception as drive_exc:  # noqa: BLE001
+            await update.message.reply_text(
+                f"Видео готово локально ({video_path}), но отправить в чат не удалось: "
+                f"{drive_exc}"
+            )
+
     return ConversationHandler.END
 
-async def generate_video(prompt_text):
-    """
-    Здесь должна быть логика генерации промпта и видео.
-    Пока что создадим тестовое видео или имитируем задержку.
-    """
-    await asyncio.sleep(3)  # имитация задержки
 
-    # Создайте или скачайте ваше видео сюда и укажите путь
-    # Например, скачайте сгенерированное видео или создайте его
-    # Для теста создадим пустой файл
-    video_filename = 'output_video.mp4'
-    with open(video_filename, 'wb') as f:
-        f.write(b'\x00\x00\x00\x00')  # замените на ваше видео
-
-    return video_filename
-
-def upload_file_to_drive(file_path):
-    file_metadata = {'name': os.path.basename(file_path)}
-    if DRIVE_FOLDER_ID:
-        file_metadata['parents'] = [DRIVE_FOLDER_ID]
-    media = MediaFileUpload(file_path, resumable=True)
-    file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
-
-    # Создаем публичную ссылку
-    drive_service.permissions().create(
-        fileId=file.get('id'),
-        body={'type': 'anyone', 'role': 'reader'}
-    ).execute()
-
-    # Получаем публичную ссылку
-    file_url = f"https://drive.google.com/uc?id={file.get('id')}&export=download"
-    return file_url
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Диалог завершен.")
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text("Диалог завершён.")
     return ConversationHandler.END
 
-def main():
+
+def main() -> None:
+    if not API_KEY:
+        raise SystemExit(
+            "TELEGRAM_BOT_TOKEN is not set. Export it or configure it via Devin's "
+            "secrets manager before starting the bot."
+        )
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
     app = ApplicationBuilder().token(API_KEY).build()
-
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler('start', start)],
+        entry_points=[CommandHandler("start", start)],
         states={
             ASK_VIDEO_TYPE: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_video_type)],
         },
-        fallbacks=[CommandHandler('cancel', cancel)],
+        fallbacks=[CommandHandler("cancel", cancel)],
     )
-
     app.add_handler(conv_handler)
 
-    print("Бот запущен")
+    log.info("Бот запущен, COMFYUI_URL=%s output=%s", COMFYUI_URL, OUTPUT_DIR)
     app.run_polling()
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

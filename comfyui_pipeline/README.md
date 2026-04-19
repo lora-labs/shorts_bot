@@ -1,121 +1,168 @@
 # ComfyUI Scene Pipeline
 
-End-to-end pipeline that turns a **text idea** into a set of short scene videos
-via ComfyUI. Stages:
+End-to-end pipeline that turns a **text idea** into a finished short video.
+One input, one output:
 
 ```
 text idea
-  └─► Qwen (local)  ──► JSON scenario ──► for each scene:
-                                           ├─► SDXL (keyframe image)
-                                           └─► LTX-Video (img → video)
+  └─► Qwen3-8B (local)  ──► JSON scenario ──► for each scene:
+                                              ├─► SDXL + KSamplerAdvanced (keyframe PNG)
+                                              └─► LTX-2.3 Distilled (img → MP4)
+                                           ──► ffmpeg concat ──► final.mp4
 ```
 
-The orchestrator is a plain Python script that talks to a running ComfyUI via
-its HTTP + WebSocket API. Two custom nodes (`QwenScenarioGenerator`,
-`SaveTextToFile`) are installed into ComfyUI so the LLM stage runs fully
-locally.
+Three entry points wrap the same orchestrator:
+
+* **CLI** — `python -m comfyui_pipeline.src.cli "idea"`
+* **Telegram bot** — `python "bot.py "` (reads `TELEGRAM_BOT_TOKEN`)
+* **Web UI** — `python -m comfyui_pipeline.gradio_app` (Gradio)
+
+Two custom ComfyUI nodes (`QwenScenarioGenerator`, `SaveTextToFile`) handle the
+LLM stage locally; everything else uses stock ComfyUI + official LTX-2.3 nodes.
 
 ## Layout
 
 ```
 comfyui_pipeline/
 ├── custom_nodes/scene_pipeline/    # drop-in ComfyUI custom node package
-│   ├── __init__.py
-│   ├── qwen_node.py                #   QwenScenarioGenerator
+│   ├── qwen_node.py                #   QwenScenarioGenerator (Qwen3-aware)
 │   └── text_save_node.py           #   SaveTextToFile
 ├── workflows/                      # ComfyUI "API format" workflows
-│   ├── script_gen_api.json         #   idea → Qwen → JSON
-│   ├── scene_image_api.json        #   prompt → SDXL → PNG
-│   └── scene_video_api.json        #   image + prompt → LTX → MP4
+│   ├── script_gen_api.json         #   idea → Qwen3 → JSON
+│   ├── scene_image_api.json        #   prompt → SDXL + KSamplerAdvanced → PNG
+│   └── scene_video_api.json        #   image + prompt → LTX-2.3 → MP4
 ├── prompts/system_prompt.txt       # JSON-only system prompt for Qwen
 ├── src/
 │   ├── comfy_client.py             # minimal HTTP + WS client
-│   ├── orchestrator.py             # pipeline glue
+│   ├── orchestrator.py             # pipeline glue + ffmpeg concat
 │   ├── schema.py                   # Pydantic Scenario/Scene models
 │   └── cli.py                      # `python -m comfyui_pipeline.src.cli ...`
+├── gradio_app.py                   # Web UI
 ├── tests/                          # offline unit tests (no ComfyUI required)
 └── requirements.txt
 ```
 
+The Telegram bot lives at the repo root as `bot.py ` (file name kept as in the
+original commit; Python imports it via the filename, not as a module).
+
 ## Prerequisites
 
-* A running ComfyUI (>= 0.3, the one bundled with core LTX support) reachable
-  on `http://127.0.0.1:8188` (or wherever — configurable).
-* Python 3.10+ on the machine running the orchestrator (can be the same box).
-* CUDA GPU recommended. Rough VRAM floor for the defaults:
+* A running **ComfyUI** with official LTX-2 support (uses core nodes
+  `LTXAVTextEncoderLoader`, `SamplerCustomAdvanced`, `LTXVConditioning`, etc.).
+  Upgrade to the latest ComfyUI and install **ComfyUI-LTXVideo** for the
+  custom LTX helper nodes (not strictly required for this pipeline, but handy).
+* **FFmpeg** in `PATH` — the orchestrator uses it to concatenate per-scene
+  MP4s into `final.mp4`.
+* Python 3.10+ on the box running the orchestrator (can be the same host).
+* CUDA GPU. VRAM floor for the defaults:
   * SDXL base: ~8 GB
-  * LTX-Video 2B 0.9: ~10–12 GB
-  * Qwen2.5-7B-Instruct bf16: ~15 GB (use a smaller Qwen or a quant if tight).
-  * The pipeline runs image + video workflows *sequentially*, so the peak is
-    whichever stage needs more, not the sum.
+  * **LTX-2.3 22B Distilled**: ~32 GB (use the `ltx-2.3-…-distilled-lora-…`
+    LoRA we ship defaults for; see below)
+  * **Qwen3-8B** bf16: ~17 GB (or load it 4-bit via `transformers`)
+  * Stages run sequentially, so peak VRAM = max(stage), not the sum.
 
-### Required model files (place in your ComfyUI install)
+### Required model files
 
-| Path under `ComfyUI/models/` | Source |
+Place the following under your ComfyUI install (paths relative to
+`ComfyUI/models/`):
+
+| Path | Source |
 | --- | --- |
 | `checkpoints/sd_xl_base_1.0.safetensors` | <https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0> |
-| `checkpoints/ltx-video-2b-v0.9.safetensors` | <https://huggingface.co/Lightricks/LTX-Video> |
+| `checkpoints/ltx-2.3-22b-distilled-1.1.safetensors` | <https://huggingface.co/Lightricks/LTX-Video> |
+| `loras/ltx-2.3-22b-distilled-lora-384-1.1.safetensors` | same Lightricks repo |
+| `text_encoders/comfy_gemma_3_12B_it.safetensors` | same Lightricks repo |
 
-The Qwen model is loaded through `transformers`; by default
-`Qwen/Qwen2.5-7B-Instruct` is pulled from the Hugging Face hub on first run.
-Swap via `--qwen-model` / `PipelineConfig.qwen_model` (e.g. a local path or
-`Qwen/Qwen2.5-3B-Instruct` if you want something lighter).
+Qwen3-8B is pulled on first run via `transformers` (defaults to
+`Qwen/Qwen3-8B`). Override with `--qwen-model` or
+`PipelineConfig.qwen_model=` (e.g. a local path, or `Qwen/Qwen3-14B` if you
+have the VRAM).
 
 ## Install
 
-### 1. Install the custom nodes into ComfyUI
+### 1. Custom nodes into ComfyUI
 
 ```bash
 # from your ComfyUI checkout
 ln -s /abs/path/to/shorts_bot/comfyui_pipeline/custom_nodes/scene_pipeline \
       ComfyUI/custom_nodes/scene_pipeline
-# or just copy the directory
 
 # install the node's Python deps into ComfyUI's venv
-pip install "transformers>=4.45" "accelerate>=0.33" "safetensors" "torch>=2.1"
+pip install "transformers>=4.51" "accelerate>=0.33" "safetensors" "torch>=2.1"
 ```
 
-Restart ComfyUI. You should now see **Qwen Scenario Generator** and
+`transformers>=4.51` is required for the Qwen3 chat template
+(`enable_thinking=False`).
+
+Restart ComfyUI. You should see **Qwen Scenario Generator** and
 **Save Text To File** under the `scene_pipeline` category.
 
-### 2. Install the orchestrator
+### 2. Orchestrator / bot / Web UI
 
 ```bash
 cd shorts_bot
 pip install -r comfyui_pipeline/requirements.txt
 ```
 
+That pulls `requests`, `websocket-client`, `pydantic`, `gradio`, and
+`python-telegram-bot`.
+
 ## Run
 
+### CLI
+
 ```bash
-export PYTHONPATH=$(pwd)          # so `comfyui_pipeline` is importable
+export PYTHONPATH=$(pwd)
 python -m comfyui_pipeline.src.cli \
     "a lonely astronaut discovers a forest on a moon" \
     --comfyui-url http://127.0.0.1:8188 \
     --output-dir output/scenes \
-    --qwen-model Qwen/Qwen2.5-7B-Instruct \
+    --qwen-model Qwen/Qwen3-8B \
     --sdxl-checkpoint sd_xl_base_1.0.safetensors \
-    --ltx-checkpoint ltx-video-2b-v0.9.safetensors \
+    --ltx-checkpoint ltx-2.3-22b-distilled-1.1.safetensors \
     --seed 42
 ```
 
-The script prints one line per rendered scene. Artifacts land in
-`output/scenes/`:
+Artifacts:
 
 ```
 output/scenes/
 ├── scenario.json        # full parsed scenario
 ├── index.json           # manifest: scene id → image + video paths
-├── scene_01.png         # SDXL keyframe
-├── scene_01.mp4         # LTX video
-├── scene_02.png
-├── scene_02.mp4
-└── ...
+├── scene_01.png / .mp4
+├── scene_02.png / .mp4
+├── concat_list.txt      # ffmpeg concat demuxer input
+└── final.mp4            # all scenes stitched together
 ```
 
-## How it fits together
+### Telegram bot
 
-### Stage 1 — Scenario (Qwen)
+```bash
+export TELEGRAM_BOT_TOKEN=...           # from @BotFather
+export COMFYUI_URL=http://127.0.0.1:8188
+python "bot.py "
+```
+
+Flow: `/start` → user sends a description → bot runs the pipeline → replies
+with `final.mp4` in the chat (or a Google Drive link if the file exceeds
+Telegram's 50 MB Bot API upload limit). Drive upload is optional; drop
+`credentials.json` next to `bot.py ` (or set `GOOGLE_APPLICATION_CREDENTIALS`)
+to enable it.
+
+### Gradio Web UI
+
+```bash
+python -m comfyui_pipeline.gradio_app
+# open http://localhost:7860
+```
+
+Single textbox for the idea, a Generate button, and outputs for the scenario
+title, per-scene descriptions, each keyframe + clip, and the final stitched
+video.
+
+## Pipeline stages in detail
+
+### Stage 1 — Scenario (Qwen3)
 
 `workflows/script_gen_api.json` wires:
 
@@ -125,45 +172,63 @@ PrimitiveStringMultiline (system prompt)
 PrimitiveStringMultiline (idea) ──► QwenScenarioGenerator ──► SaveTextToFile
 ```
 
-The orchestrator calls `POST /prompt`, waits on the websocket until the prompt
-finishes, then reads `outputs[<qwen_node>].text[0]` from `/history/{id}` and
-parses it as a `Scenario` (see `schema.py`). On a parse failure it retries once
-with a stricter reminder appended to the user prompt.
+`QwenScenarioGenerator` loads any Qwen-family causal LM through
+`transformers.AutoModelForCausalLM`. It passes `enable_thinking=False` to the
+Qwen3 chat template where supported and strips any leading `<think>…</think>`
+block so downstream JSON parsing stays strict. On parse failure the
+orchestrator retries once with a reminder appended to the idea.
 
-### Stage 2 — Keyframe image (SDXL)
+### Stage 2 — Keyframe image (SDXL + KSamplerAdvanced)
 
-`workflows/scene_image_api.json` is a standard SDXL txt2img graph:
+`workflows/scene_image_api.json`:
 
 ```
 CheckpointLoaderSimple
   ├─► (CLIP) CLIPTextEncode (+/−)
-  └─► (MODEL, VAE) → KSampler → VAEDecode → SaveImage
+  └─► (MODEL, VAE) → KSamplerAdvanced → VAEDecode → SaveImage
 ```
 
-For each scene the orchestrator patches the positive prompt
-(`scene.image_prompt + ", " + scenario.style`), the negative prompt, the
-KSampler seed, and the SaveImage filename prefix. The rendered PNG is
-downloaded via `/view` and also uploaded back into ComfyUI's `input/` dir via
+`KSamplerAdvanced` is used (not the basic `KSampler`) so noise, start/end
+steps and leftover-noise behaviour are explicit — useful if you later want to
+split generation into multiple passes. Per scene the orchestrator patches the
+positive prompt (`scene.image_prompt + ", " + scenario.style`), negative
+prompt, `noise_seed`, steps, CFG, and filename prefix. The rendered PNG is
+downloaded via `/view` and also re-uploaded to ComfyUI `input/` via
 `/upload/image` so the next workflow can `LoadImage` it.
 
-### Stage 3 — Scene video (LTX-Video)
+### Stage 3 — Scene video (LTX-2.3 Distilled, single-stage I2V)
 
-`workflows/scene_video_api.json` follows the core ComfyUI LTX example:
+`workflows/scene_video_api.json` implements the Lightricks single-stage
+distilled I2V graph (video-only, no audio):
 
 ```
-CheckpointLoaderSimple (LTX)
-   ├─► (MODEL) ──────────────────────────────────────► SamplerCustom
-   ├─► (CLIP) → CLIPTextEncode (+/−) → LTXVConditioning ─┐
-   └─► (VAE) ──────┐                                      │
-LoadImage  ───────►│                                      │
-                   └─► LTXVImgToVideo ─► LTXVScheduler ──►│
-                        │                                 │
-                        └──► SamplerCustom ─► VAEDecode ─► CreateVideo ─► SaveVideo (mp4)
+CheckpointLoaderSimple (LTX-2.3) ──► (MODEL) ──► LoraLoaderModelOnly (distilled LoRA)
+                                                                      │
+                                                                      ▼
+LTXAVTextEncoderLoader (Gemma 3 12B) ──► (CLIP) ──► CLIPTextEncode (+/−) ──► LTXVConditioning
+                                                                                     │
+LoadImage ─────────────────────────────────────────────────────────────────► LTXVImgToVideoConditionOnly
+                                                                                     │
+                                                                    EmptyLTXVLatentVideo
+                                                                                     │
+                                        LTXVScheduler ─► KSamplerSelect ─► SamplerCustomAdvanced
+                                                         RandomNoise  ──►        │
+                                                         CFGGuider   ──►         │
+                                                                                 ▼
+                                                                 VAEDecode ─► CreateVideo ─► SaveVideo (mp4)
 ```
 
 The orchestrator computes `length = frames_for(duration_seconds)` enforcing
-`(length - 1) % 8 == 0` and `length >= 9` (LTX requirement). Output mp4 is
-downloaded to `output/scenes/scene_{NN}.mp4`.
+LTX's `(length - 1) % 8 == 0` and `length ≥ 9`. The distilled workflow uses
+15 steps and `cfg=1.0` by default — the LoRA is the magic that collapses the
+full 25-step chain into a fast distilled pass.
+
+### Stage 4 — Final concatenation (FFmpeg)
+
+After all scenes finish, `_concat_final_video()` writes a concat demuxer list
+and invokes `ffmpeg -f concat -safe 0 -i concat_list.txt -c copy final.mp4`.
+If stream copy fails (e.g. codecs mismatch) it automatically re-encodes with
+`libx264 yuv420p crf=18`. Toggle with `PipelineConfig.concat_final_video`.
 
 ## Programmatic use
 
@@ -173,29 +238,28 @@ from comfyui_pipeline.src.orchestrator import PipelineConfig, ScenePipeline
 pipeline = ScenePipeline(PipelineConfig(
     comfyui_url="http://127.0.0.1:8188",
     output_dir="output/my_story",
-    qwen_model="Qwen/Qwen2.5-7B-Instruct",
+    qwen_model="Qwen/Qwen3-8B",
+    ltx_checkpoint="ltx-2.3-22b-distilled-1.1.safetensors",
     seed=123,
 ))
 result = pipeline.run("a cat learns to surf during sunset")
+print("final video:", result.final_video_path)
 for sa in result.scene_artifacts:
     print(sa.scene.id, sa.video_path)
 ```
 
-Hooking the pipeline up to the existing `shorts_bot` Telegram handler is a
-drop-in replacement for the stubbed `generate_video()` function.
-
 ## Testing
 
-Offline unit tests cover the schema, workflow JSON structure, and orchestrator
-helpers — no ComfyUI needed:
+Offline unit tests cover the schema, workflow JSON structure, orchestrator
+helpers and the ffmpeg concat step (mocked) — no ComfyUI or GPU needed:
 
 ```bash
 pip install pytest
 pytest comfyui_pipeline/tests
 ```
 
-End-to-end runs require a working ComfyUI with the models above and the
-`scene_pipeline` custom nodes installed.
+End-to-end runs require a working ComfyUI with the models listed above, the
+`scene_pipeline` custom nodes, and `ffmpeg` in `PATH`.
 
 ## Tuning
 
@@ -203,13 +267,17 @@ Common knobs on `PipelineConfig`:
 
 | Field | Default | Notes |
 | --- | --- | --- |
+| `qwen_model` | `Qwen/Qwen3-8B` | HF ID or local path |
+| `sdxl_checkpoint` | `sd_xl_base_1.0.safetensors` | Any SDXL checkpoint |
+| `ltx_checkpoint` | `ltx-2.3-22b-distilled-1.1.safetensors` | LTX-2.3 distilled |
+| `ltx_lora` | `ltx-2.3-22b-distilled-lora-384-1.1.safetensors` | Distilled LoRA |
+| `ltx_lora_strength` | `1.0` | `0.5–1.0` sensible range |
+| `ltx_text_encoder` | `comfy_gemma_3_12B_it.safetensors` | Local Gemma 3 12B |
 | `image_width` / `image_height` | 1024×576 | 16:9 key frame |
-| `video_width` / `video_height` | 768×512 | Must be multiples of 32 |
-| `video_length_frames` | 97 | Overridden per-scene from `duration_seconds` |
+| `video_width` / `video_height` | 960×544 | Must be multiples of 32 |
 | `video_fps` | 25.0 | Matches `LTXVConditioning.frame_rate` |
-| `image_steps` / `image_cfg` | 28 / 6.5 | SDXL sampler |
-| `video_steps` / `video_cfg` | 30 / 3.0 | LTX sampler |
+| `image_steps` / `image_cfg` | 28 / 6.5 | SDXL (KSamplerAdvanced) |
+| `video_steps` / `video_cfg` | 15 / 1.0 | LTX-2.3 distilled |
 | `max_script_retries` | 1 | Retries on invalid JSON from Qwen |
-
-If you need a lighter LTX model (e.g. on 12 GB), you can use the distilled
-variants from the Lightricks repo — just swap `--ltx-checkpoint`.
+| `concat_final_video` | `True` | Disable to skip ffmpeg |
+| `ffmpeg_binary` | `ffmpeg` | Override if ffmpeg lives elsewhere |

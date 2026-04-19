@@ -86,7 +86,7 @@ class QwenScenarioGenerator:
             "required": {
                 "model_name_or_path": (
                     "STRING",
-                    {"default": "Qwen/Qwen2.5-7B-Instruct", "multiline": False},
+                    {"default": "Qwen/Qwen3-8B", "multiline": False},
                 ),
                 "system_prompt": ("STRING", {"multiline": True, "default": ""}),
                 "user_prompt": ("STRING", {"multiline": True, "default": ""}),
@@ -129,9 +129,18 @@ class QwenScenarioGenerator:
             messages.append({"role": "system", "content": system_prompt.strip()})
         messages.append({"role": "user", "content": user_prompt.strip()})
 
-        prompt_text = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
+        template_kwargs: dict[str, Any] = {
+            "tokenize": False,
+            "add_generation_prompt": True,
+        }
+        # Qwen3 supports a "thinking mode" that emits <think>...</think>. For
+        # strict JSON output we disable it when the tokenizer accepts the flag.
+        try:
+            prompt_text = tokenizer.apply_chat_template(
+                messages, enable_thinking=False, **template_kwargs
+            )
+        except TypeError:
+            prompt_text = tokenizer.apply_chat_template(messages, **template_kwargs)
         inputs = tokenizer(prompt_text, return_tensors="pt").to(resolved_device)
 
         if seed:
@@ -152,6 +161,10 @@ class QwenScenarioGenerator:
 
         generated = output_ids[0][inputs["input_ids"].shape[1]:]
         text = tokenizer.decode(generated, skip_special_tokens=True).strip()
+        # Strip any leading <think>...</think> block produced by Qwen3 in
+        # thinking mode (older tokenizers ignore enable_thinking=False).
+        import re as _re
+        text = _re.sub(r"^<think>.*?</think>\s*", "", text, flags=_re.DOTALL).strip()
 
         if not keep_loaded:
             _unload_all()
