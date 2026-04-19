@@ -1,2 +1,3 @@
-credentials.json__pycache__/
+credentials.json
+__pycache__/
 *.pyc
