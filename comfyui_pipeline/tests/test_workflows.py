@@ -62,12 +62,16 @@ def test_scene_image_workflow_uses_ksampler_advanced() -> None:
 def test_scene_video_workflow_is_ltx_2_3() -> None:
     data = json.loads((WORKFLOW_DIR / "scene_video_api.json").read_text(encoding="utf-8"))
     class_types = {node["class_type"] for node in data.values()}
-    # LTX-2.3 single-stage I2V chain
+    # LTX-2.3 single-stage I2V chain. As of ComfyUI core 0.18+ the builtin
+    # LTXVImgToVideo node subsumes both the old EmptyLTXVLatentVideo and
+    # LTXVImgToVideoConditionOnly nodes (it accepts positive/negative/vae/
+    # image and width/height/length and emits positive/negative/latent in
+    # one shot). The old names were removed from both ComfyUI core and the
+    # Lightricks ComfyUI-LTXVideo extension, so we must not reference them.
     for expected in (
         "LTXAVTextEncoderLoader",
         "LTXVConditioning",
-        "EmptyLTXVLatentVideo",
-        "LTXVImgToVideoConditionOnly",
+        "LTXVImgToVideo",
         "LTXVScheduler",
         "KSamplerSelect",
         "RandomNoise",
@@ -77,6 +81,7 @@ def test_scene_video_workflow_is_ltx_2_3() -> None:
         "SaveVideo",
     ):
         assert expected in class_types, f"scene_video_api.json must contain {expected}"
-    # Old LTX-2.0 nodes must be gone.
+    # Old LTX-2.0 / removed LTX-2.3 pre-release nodes must be gone.
     assert "SamplerCustom" not in class_types
-    assert "LTXVImgToVideo" not in class_types
+    assert "EmptyLTXVLatentVideo" not in class_types
+    assert "LTXVImgToVideoConditionOnly" not in class_types

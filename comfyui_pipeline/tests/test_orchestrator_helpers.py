@@ -92,10 +92,15 @@ def test_build_video_workflow_wires_ltx23_nodes(tmp_path) -> None:
     assert lora["inputs"]["lora_name"] == "ltx23-lora.safetensors"
     assert lora["inputs"]["strength_model"] == 0.7
 
-    # Image load + latent dims
+    # Image load + latent dims. Builtin LTXVImgToVideo owns width/height/length
+    # (the old EmptyLTXVLatentVideo node is gone — the img2video node produces
+    # the latent directly from the keyframe image).
     assert wf[orch._find_node_by_title(wf, "Load keyframe image")]["inputs"]["image"] == "uploads/keyframe.png"
-    latent = wf[orch._find_node_by_title(wf, "LTX empty latent")]["inputs"]
-    assert latent["length"] == pipeline._frames_for_duration(3.0)
+    i2v = wf[orch._find_node_by_title(wf, "LTX img-to-video")]
+    assert i2v["class_type"] == "LTXVImgToVideo"
+    assert i2v["inputs"]["length"] == pipeline._frames_for_duration(3.0)
+    assert i2v["inputs"]["width"] == cfg.video_width
+    assert i2v["inputs"]["height"] == cfg.video_height
 
     # Sampler stack
     sampler_adv = wf[orch._find_node_by_title(wf, "Sample video latent")]
