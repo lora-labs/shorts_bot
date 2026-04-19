@@ -14,7 +14,7 @@ text idea
 Three entry points wrap the same orchestrator:
 
 * **CLI** — `python -m comfyui_pipeline.src.cli "idea"`
-* **Telegram bot** — `python "bot.py "` (reads `TELEGRAM_BOT_TOKEN`)
+* **Telegram bot** — `python bot.py` (reads `TELEGRAM_BOT_TOKEN`)
 * **Web UI** — `python -m comfyui_pipeline.gradio_app` (Gradio)
 
 Two custom ComfyUI nodes (`QwenScenarioGenerator`, `SaveTextToFile`) handle the
@@ -42,8 +42,7 @@ comfyui_pipeline/
 └── requirements.txt
 ```
 
-The Telegram bot lives at the repo root as `bot.py ` (file name kept as in the
-original commit; Python imports it via the filename, not as a module).
+The Telegram bot lives at the repo root as `bot.py`.
 
 ## Prerequisites
 
@@ -140,13 +139,13 @@ output/scenes/
 ```bash
 export TELEGRAM_BOT_TOKEN=...           # from @BotFather
 export COMFYUI_URL=http://127.0.0.1:8188
-python "bot.py "
+python bot.py
 ```
 
 Flow: `/start` → user sends a description → bot runs the pipeline → replies
 with `final.mp4` in the chat (or a Google Drive link if the file exceeds
 Telegram's 50 MB Bot API upload limit). Drive upload is optional; drop
-`credentials.json` next to `bot.py ` (or set `GOOGLE_APPLICATION_CREDENTIALS`)
+`credentials.json` next to `bot.py` (or set `GOOGLE_APPLICATION_CREDENTIALS`)
 to enable it.
 
 ### Gradio Web UI
