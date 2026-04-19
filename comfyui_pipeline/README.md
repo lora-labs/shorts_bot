@@ -214,12 +214,14 @@ distilled I2V graph (video-only, no audio):
 CheckpointLoaderSimple (LTX-2.3) ──► (MODEL) ──► LoraLoaderModelOnly (distilled LoRA)
                                                                       │
                                                                       ▼
-LTXAVTextEncoderLoader (Gemma 3 12B) ──► (CLIP) ──► CLIPTextEncode (+/−) ──► LTXVConditioning
-                                                                                     │
-LoadImage ─────────────────────────────────────────────────────────────────► LTXVImgToVideoConditionOnly
-                                                                                     │
-                                                                    EmptyLTXVLatentVideo
-                                                                                     │
+LTXAVTextEncoderLoader (Gemma 3 12B) ──► (CLIP) ──► CLIPTextEncode (+/−)
+                                                              │
+LoadImage ──────────────────────────────► LTXVImgToVideo (width/height/length, strength)
+                                                              │
+                                                 (positive, negative, latent)
+                                                              │
+                                                        LTXVConditioning (frame_rate)
+                                                              │
                                         LTXVScheduler ─► KSamplerSelect ─► SamplerCustomAdvanced
                                                          RandomNoise  ──►        │
                                                          CFGGuider   ──►         │
