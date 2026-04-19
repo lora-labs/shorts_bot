@@ -154,7 +154,8 @@ async def ask_video_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     size_mb = video_path.stat().st_size / (1024 * 1024)
     try:
         if size_mb <= TELEGRAM_MAX_UPLOAD_MB:
-            await update.message.reply_video(video=video_path.open("rb"))
+            with video_path.open("rb") as vf:
+                await update.message.reply_video(video=vf)
         else:
             raise RuntimeError(
                 f"video {size_mb:.1f} MB > Telegram limit, uploading to Drive"

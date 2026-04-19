@@ -15,6 +15,9 @@ from pathlib import Path
 
 from .orchestrator import PipelineConfig, ScenePipeline
 
+# Pull defaults from PipelineConfig so CLI flags and programmatic use stay in sync.
+_DEFAULTS = PipelineConfig()
+
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -23,19 +26,21 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("idea", help="The text idea describing the video you want")
     parser.add_argument(
         "--comfyui-url",
-        default=os.environ.get("COMFYUI_URL", "http://127.0.0.1:8188"),
+        default=os.environ.get("COMFYUI_URL", _DEFAULTS.comfyui_url),
         help="ComfyUI HTTP endpoint (default: %(default)s)",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path(os.environ.get("SCENE_OUTPUT_DIR", "output/scenes")),
+        default=Path(os.environ.get("SCENE_OUTPUT_DIR", str(_DEFAULTS.output_dir))),
     )
-    parser.add_argument("--qwen-model", default="Qwen/Qwen2.5-7B-Instruct")
-    parser.add_argument("--sdxl-checkpoint", default="sd_xl_base_1.0.safetensors")
-    parser.add_argument("--ltx-checkpoint", default="ltx-video-2b-v0.9.safetensors")
+    parser.add_argument("--qwen-model", default=_DEFAULTS.qwen_model)
+    parser.add_argument("--sdxl-checkpoint", default=_DEFAULTS.sdxl_checkpoint)
+    parser.add_argument("--ltx-checkpoint", default=_DEFAULTS.ltx_checkpoint)
+    parser.add_argument("--ltx-lora", default=_DEFAULTS.ltx_lora)
+    parser.add_argument("--ltx-text-encoder", default=_DEFAULTS.ltx_text_encoder)
     parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--video-fps", type=float, default=25.0)
+    parser.add_argument("--video-fps", type=float, default=_DEFAULTS.video_fps)
     parser.add_argument(
         "-v", "--verbose", action="store_true", help="Enable debug logging"
     )
@@ -55,6 +60,8 @@ def main(argv: list[str] | None = None) -> int:
         qwen_model=args.qwen_model,
         sdxl_checkpoint=args.sdxl_checkpoint,
         ltx_checkpoint=args.ltx_checkpoint,
+        ltx_lora=args.ltx_lora,
+        ltx_text_encoder=args.ltx_text_encoder,
         seed=args.seed,
         video_fps=args.video_fps,
     )

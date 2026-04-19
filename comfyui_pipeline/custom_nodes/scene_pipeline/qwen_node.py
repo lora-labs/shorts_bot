@@ -143,7 +143,7 @@ class QwenScenarioGenerator:
             prompt_text = tokenizer.apply_chat_template(messages, **template_kwargs)
         inputs = tokenizer(prompt_text, return_tensors="pt").to(resolved_device)
 
-        if seed:
+        if seed is not None:
             torch.manual_seed(seed)
             if torch.cuda.is_available():
                 torch.cuda.manual_seed_all(seed)
