@@ -765,3 +765,159 @@ def test_fast_preview_disabled_leaves_scenario_intact(tmp_path) -> None:
     out = pipeline._apply_fast_preview(scenario)
     assert len(out.scenes) == 5
     assert all(sc.duration_seconds == 6.0 for sc in out.scenes)
+
+
+def test_free_vram_default_is_enabled(tmp_path) -> None:
+    """PR #21: on low-VRAM cards (12 GB RTX 4070) SDXL+IPA+LoRA and LTX
+    22B fp8 can't coexist, so the orchestrator has to ask ComfyUI to
+    evict models between stages. That has to be the default or nobody
+    benefits."""
+    cfg = PipelineConfig(output_dir=tmp_path)
+    assert cfg.free_vram_between_stages is True
+
+
+def test_comfy_client_free_memory_posts_to_free_endpoint(monkeypatch) -> None:
+    """ComfyClient.free_memory() hits POST /free with the expected
+    payload so ComfyUI actually drops cached weights."""
+    from comfyui_pipeline.src.comfy_client import ComfyClient
+
+    captured: dict[str, object] = {}
+
+    class _Resp:
+        def raise_for_status(self) -> None:  # pragma: no cover - trivial
+            pass
+
+    def fake_post(url, json, timeout):  # noqa: ANN001
+        captured["url"] = url
+        captured["json"] = json
+        captured["timeout"] = timeout
+        return _Resp()
+
+    monkeypatch.setattr(
+        "comfyui_pipeline.src.comfy_client.requests.post", fake_post
+    )
+    client = ComfyClient(base_url="http://example:8188")
+    client.free_memory()
+    assert captured["url"] == "http://example:8188/free"
+    assert captured["json"] == {"unload_models": True, "free_memory": True}
+
+
+def test_comfy_client_free_memory_swallows_failures(monkeypatch, caplog) -> None:
+    """A failed /free call must not abort the pipeline — the next
+    /prompt submission will still trigger ComfyUI's own eviction logic.
+    """
+    from comfyui_pipeline.src.comfy_client import ComfyClient
+
+    def fake_post(url, json, timeout):  # noqa: ANN001
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(
+        "comfyui_pipeline.src.comfy_client.requests.post", fake_post
+    )
+    client = ComfyClient()
+    with caplog.at_level("WARNING"):
+        client.free_memory()  # must not raise
+    assert any("free" in rec.message.lower() for rec in caplog.records)
+
+
+def test_run_calls_free_memory_between_stages(tmp_path, monkeypatch) -> None:
+    """PR #21: the orchestrator must invoke client.free_memory() after
+    Qwen and around each scene's SDXL / LTX boundaries. Uses a recording
+    stub in place of ComfyClient so we don't need a live server."""
+    cfg = PipelineConfig(
+        output_dir=tmp_path,
+        free_vram_between_stages=True,
+        use_ip_adapter=False,
+        concat_final_video=False,
+    )
+    pipeline = ScenePipeline(cfg)
+
+    events: list[str] = []
+
+    scenario = Scenario(
+        title="t", style="s", character_sheet="c",
+        scenes=[
+            Scene(id=i, description="x", image_prompt="x",
+                  video_prompt="x", duration_seconds=3.0)
+            for i in (1, 2)
+        ],
+    )
+
+    # Patch the heavy ops so run() only exercises its own control-flow.
+    def _gen(_idea):
+        events.append("qwen")
+        return scenario
+    monkeypatch.setattr(pipeline, "generate_scenario", _gen)
+
+    def _img(scene, *a, **kw):
+        events.append(f"img_{scene.id}")
+        p = tmp_path / f"scene_{scene.id:02d}.png"
+        p.write_bytes(b"x")
+        return "node_id", p
+    monkeypatch.setattr(pipeline, "_render_scene_image", _img)
+
+    def _vid(scene, *a, **kw):
+        events.append(f"vid_{scene.id}")
+        p = tmp_path / f"scene_{scene.id:02d}.mp4"
+        p.write_bytes(b"x")
+        return p
+    monkeypatch.setattr(pipeline, "_render_scene_video", _vid)
+
+    monkeypatch.setattr(
+        pipeline, "_upload_image_as_input",
+        lambda path: f"uploaded_{path.name}",
+    )
+
+    def _free(*, unload_models=True, free_memory=True):
+        events.append("free")
+    monkeypatch.setattr(pipeline.client, "free_memory", _free)
+
+    pipeline.run("idea")
+
+    # Expected order: qwen, free, then for each scene (img, free, vid, free).
+    assert events == [
+        "qwen", "free",
+        "img_1", "free", "vid_1", "free",
+        "img_2", "free", "vid_2", "free",
+    ]
+
+
+def test_run_skips_free_memory_when_disabled(tmp_path, monkeypatch) -> None:
+    """Users on high-VRAM cards can opt out via --no-free-vram-between-stages
+    and the orchestrator must then never hit /free."""
+    cfg = PipelineConfig(
+        output_dir=tmp_path,
+        free_vram_between_stages=False,
+        use_ip_adapter=False,
+        concat_final_video=False,
+    )
+    pipeline = ScenePipeline(cfg)
+
+    scenario = Scenario(
+        title="t", style="s", character_sheet="c",
+        scenes=[
+            Scene(id=1, description="x", image_prompt="x",
+                  video_prompt="x", duration_seconds=3.0),
+        ],
+    )
+    monkeypatch.setattr(pipeline, "generate_scenario", lambda _i: scenario)
+    monkeypatch.setattr(
+        pipeline, "_render_scene_image",
+        lambda *a, **kw: ("n", (tmp_path / "i.png")),
+    )
+    (tmp_path / "i.png").write_bytes(b"x")
+    monkeypatch.setattr(
+        pipeline, "_render_scene_video",
+        lambda *a, **kw: (tmp_path / "v.mp4"),
+    )
+    (tmp_path / "v.mp4").write_bytes(b"x")
+    monkeypatch.setattr(pipeline, "_upload_image_as_input", lambda p: "u")
+
+    called = {"n": 0}
+
+    def _free(**kw):
+        called["n"] += 1
+    monkeypatch.setattr(pipeline.client, "free_memory", _free)
+
+    pipeline.run("idea")
+    assert called["n"] == 0

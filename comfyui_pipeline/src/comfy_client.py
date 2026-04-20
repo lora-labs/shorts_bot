@@ -94,6 +94,39 @@ class ComfyClient:
         self.wait_for_completion(prompt_id, timeout=timeout)
         return self.get_history(prompt_id)
 
+    def free_memory(
+        self, unload_models: bool = True, free_memory: bool = True
+    ) -> None:
+        """Ask ComfyUI to evict loaded models and free VRAM/RAM.
+
+        Calls ``POST /free`` — ComfyUI's built-in endpoint for releasing
+        GPU memory between unrelated workflows. The orchestrator uses
+        this between the image (SDXL + IP-Adapter + LoRA, ~8 GB) and
+        video (LTX 22B fp8, ~29 GB) stages so the two big models never
+        contend for VRAM on constrained GPUs (e.g. 12 GB RTX 4070).
+
+        Best-effort: a network / server-side failure is logged and
+        swallowed so it doesn't break the pipeline — the next /prompt
+        submission will just trigger ComfyUI's own model-management
+        heuristics instead.
+        """
+        try:
+            resp = requests.post(
+                f"{self.base_url}/free",
+                json={
+                    "unload_models": unload_models,
+                    "free_memory": free_memory,
+                },
+                timeout=30,
+            )
+            resp.raise_for_status()
+            log.info(
+                "Asked ComfyUI to free memory (unload_models=%s, free_memory=%s)",
+                unload_models, free_memory,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("ComfyUI /free request failed (non-fatal): %s", exc)
+
     def fetch_file(self, file: ComfyOutputFile, dest: Path) -> Path:
         """Download one output/temp file via /view to dest."""
         params = {"filename": file.filename, "subfolder": file.subfolder, "type": file.type}
