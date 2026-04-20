@@ -171,6 +171,14 @@ class PipelineConfig:
     scenes_count_hint: int | None = None
     scene_duration_hint: float | None = None
 
+    # Ask ComfyUI to evict loaded models (via POST /free) at specific
+    # stage boundaries. Needed on low-VRAM setups where SDXL+IP-Adapter
+    # and LTX 22B fp8 cannot co-exist in VRAM (e.g. RTX 4070 12 GB):
+    # without eviction the second stage starts swapping weights from
+    # system RAM and the pipeline effectively hangs on the first video
+    # step. Off by default would regress those users; leave on.
+    free_vram_between_stages: bool = True
+
     # Scenario workflow can take 15+ min when Qwen runs on CPU (default on
     # low-VRAM setups). 30 min default gives headroom for that + reasoning.
     script_timeout: float = 1800.0
@@ -743,6 +751,14 @@ class ScenePipeline:
         scenario = self._apply_fast_preview(scenario)
         log.info("Scenario: %s (%d scenes)", scenario.title, len(scenario.scenes))
 
+        # After Qwen has produced the scenario, ask ComfyUI to drop the
+        # 8B LLM out of memory before we start loading SDXL checkpoints.
+        # On combined CPU+GPU setups qwen_keep_loaded=False already does
+        # this inside the custom node, but /free is a belt-and-braces
+        # cleanup for any residual CUDA allocator state.
+        if self.config.free_vram_between_stages:
+            self.client.free_memory()
+
         (self.config.output_dir / "scenario.json").write_text(
             scenario.model_dump_json(indent=2), encoding="utf-8"
         )
@@ -784,9 +800,20 @@ class ScenePipeline:
                 # The image uploaded as LTX keyframe is the same file we want
                 # IPAdapter to see in later scenes — reuse it.
                 ip_adapter_reference = input_name
+            # Evict SDXL + IP-Adapter + LoRA weights before loading the
+            # much larger LTX video model. On 12 GB cards (RTX 4070) the
+            # two stages combined exceed VRAM and ComfyUI otherwise
+            # silently stalls streaming weights from system RAM.
+            if self.config.free_vram_between_stages:
+                self.client.free_memory()
             video_local = self._render_scene_video(
                 scene, input_name, scenario.style, vid_seed, scenario.character_sheet
             )
+            # And free the LTX weights before looping back to the next
+            # scene's SDXL pass, so the SDXL checkpoint + IPA load into
+            # a clean VRAM rather than evicting pieces of LTX first.
+            if self.config.free_vram_between_stages:
+                self.client.free_memory()
             result.scene_artifacts.append(
                 SceneArtifacts(scene=scene, image_path=image_local, video_path=video_local)
             )

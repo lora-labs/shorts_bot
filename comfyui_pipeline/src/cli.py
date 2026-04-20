@@ -86,6 +86,19 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--no-free-vram-between-stages",
+        dest="free_vram_between_stages",
+        action="store_false",
+        help=(
+            "Do NOT call ComfyUI /free between Qwen / SDXL / LTX stages. "
+            "By default the orchestrator asks ComfyUI to evict models at "
+            "stage boundaries so SDXL+IPA and LTX-22B-fp8 don't fight for "
+            "VRAM on low-VRAM cards (e.g. RTX 4070 12 GB). Disable only on "
+            "GPUs with enough VRAM to keep everything resident."
+        ),
+    )
+    parser.set_defaults(free_vram_between_stages=_DEFAULTS.free_vram_between_stages)
+    parser.add_argument(
         "-v", "--verbose", action="store_true", help="Enable debug logging"
     )
     return parser.parse_args(argv)
@@ -112,6 +125,7 @@ def main(argv: list[str] | None = None) -> int:
         video_fps=args.video_fps,
         script_timeout=args.script_timeout,
         scene_timeout=args.scene_timeout,
+        free_vram_between_stages=args.free_vram_between_stages,
     )
     pipeline = ScenePipeline(cfg)
     result = pipeline.run(args.idea)
