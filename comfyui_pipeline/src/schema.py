@@ -26,11 +26,33 @@ class Scene(BaseModel):
     )
 
 
+# Canonical style preset ids. Qwen is asked to pick one of these.
+# Orchestrator maps the id to a concrete SDXL checkpoint via
+# ``PipelineConfig.checkpoint_presets`` (user-overridable).
+STYLE_PRESETS = (
+    "cinematic_photo",   # realistic photoreal (default fallback)
+    "photoreal",         # alt photoreal (e.g. RealVisXL)
+    "anime",             # anime/manga (AnimagineXL, Illustrious)
+    "illustration",      # stylized illustration / 3D render / painterly
+    "auto",              # let orchestrator pick based on prompt heuristics
+)
+
+
 class Scenario(BaseModel):
     """Top-level scenario returned by the Qwen stage."""
 
     title: str = Field(..., min_length=1)
     style: str = Field("cinematic", description="Global visual style keywords")
+    style_preset: str = Field(
+        "auto",
+        description=(
+            "Which SDXL checkpoint family best fits this story: "
+            "'cinematic_photo', 'photoreal', 'anime', 'illustration', or "
+            "'auto'. The orchestrator uses this to route the scenario to "
+            "the right checkpoint file. 'auto' means the orchestrator "
+            "falls back to its configured default."
+        ),
+    )
     character_sheet: str = Field(
         "",
         description=(
@@ -41,6 +63,17 @@ class Scenario(BaseModel):
         ),
     )
     scenes: list[Scene] = Field(..., min_length=1)
+
+    @field_validator("style_preset")
+    @classmethod
+    def _normalize_preset(cls, v: str) -> str:
+        """Be lenient: accept any casing / spaces / hyphens and normalise to
+        the canonical id, or fall back to 'auto' if unrecognised. Better to
+        degrade gracefully than to reject a whole scenario for a typo."""
+        cleaned = (v or "").strip().lower().replace("-", "_").replace(" ", "_")
+        if cleaned in STYLE_PRESETS:
+            return cleaned
+        return "auto"
 
     @field_validator("scenes")
     @classmethod

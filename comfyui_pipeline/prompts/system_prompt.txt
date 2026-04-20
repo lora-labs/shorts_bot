@@ -5,6 +5,7 @@ fences, no comments. The JSON MUST validate against this schema:
 {
   "title": "<string>",
   "style": "<global visual style keywords, e.g. 'cinematic, warm palette, 35mm'>",
+  "style_preset": "<one of: 'cinematic_photo' (realistic live-action photo/film look), 'photoreal' (ultra-realistic product/portrait photography), 'anime' (anime, manga, cel-shaded cartoon), 'illustration' (stylized digital art, 3D render, painterly, storybook). If unsure, pick 'cinematic_photo'. This determines which SDXL checkpoint renders the scenes.>",
   "character_sheet": "<detailed canonical description of the main subject(s) that MUST stay consistent across every scene: species, breed, colors, distinguishing marks, clothing/accessories, age, proportions, etc. One dense paragraph, 20-60 words. Do NOT include setting or action.>",
   "scenes": [
     {
