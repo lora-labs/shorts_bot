@@ -406,6 +406,98 @@ def test_concat_final_video_invokes_ffmpeg(tmp_path, monkeypatch) -> None:
     assert str(video_2.resolve()) in lst
 
 
+def test_resolve_sdxl_checkpoint_returns_default_for_auto(tmp_path) -> None:
+    cfg = PipelineConfig(output_dir=tmp_path, sdxl_checkpoint="default.safetensors")
+    pipeline = ScenePipeline(cfg)
+    assert pipeline._resolve_sdxl_checkpoint("auto") == "default.safetensors"
+    assert pipeline._resolve_sdxl_checkpoint(None) == "default.safetensors"
+    assert pipeline._resolve_sdxl_checkpoint("") == "default.safetensors"
+
+
+def test_resolve_sdxl_checkpoint_maps_preset_to_file(tmp_path) -> None:
+    cfg = PipelineConfig(
+        output_dir=tmp_path,
+        sdxl_checkpoint="default.safetensors",
+        checkpoint_presets={
+            "cinematic_photo": "jugg.safetensors",
+            "anime": "animagine.safetensors",
+        },
+    )
+    pipeline = ScenePipeline(cfg)
+    assert pipeline._resolve_sdxl_checkpoint("cinematic_photo") == "jugg.safetensors"
+    assert pipeline._resolve_sdxl_checkpoint("anime") == "animagine.safetensors"
+
+
+def test_resolve_sdxl_checkpoint_falls_back_when_preset_missing_from_map(tmp_path) -> None:
+    cfg = PipelineConfig(
+        output_dir=tmp_path,
+        sdxl_checkpoint="default.safetensors",
+        checkpoint_presets={"anime": "animagine.safetensors"},
+    )
+    pipeline = ScenePipeline(cfg)
+    # 'photoreal' not in user's map → fall back to default, don't crash.
+    assert pipeline._resolve_sdxl_checkpoint("photoreal") == "default.safetensors"
+
+
+def test_resolve_sdxl_checkpoint_override_normalises_casing_and_separators(tmp_path) -> None:
+    """User-facing labels ('Cinematic Photo', 'cinematic-photo') must be
+    accepted so Gradio dropdowns and Telegram commands can push any
+    reasonable variant without silently degrading to the default."""
+    cfg = PipelineConfig(
+        output_dir=tmp_path,
+        sdxl_checkpoint="default.safetensors",
+        checkpoint_presets={"cinematic_photo": "jugg.safetensors"},
+    )
+    pipeline = ScenePipeline(cfg)
+    for sloppy in ("Cinematic Photo", "cinematic-photo", "  CINEMATIC_PHOTO  "):
+        pipeline.config.style_preset_override = sloppy
+        assert pipeline._resolve_sdxl_checkpoint("auto") == "jugg.safetensors", sloppy
+
+
+def test_resolve_sdxl_checkpoint_override_wins_over_scenario(tmp_path) -> None:
+    cfg = PipelineConfig(
+        output_dir=tmp_path,
+        sdxl_checkpoint="default.safetensors",
+        checkpoint_presets={
+            "anime": "animagine.safetensors",
+            "cinematic_photo": "jugg.safetensors",
+        },
+        style_preset_override="anime",
+    )
+    pipeline = ScenePipeline(cfg)
+    assert pipeline._resolve_sdxl_checkpoint("cinematic_photo") == "animagine.safetensors"
+
+
+def test_resolve_sdxl_checkpoint_degrades_when_file_missing_on_disk(tmp_path) -> None:
+    """With ``sdxl_checkpoints_dir`` configured, a preset pointing at a
+    missing file must fall back to the default — a broken download
+    should not kill the whole run."""
+    cfg = PipelineConfig(
+        output_dir=tmp_path,
+        sdxl_checkpoint="default.safetensors",
+        checkpoint_presets={"anime": "animagine.safetensors"},
+        sdxl_checkpoints_dir=str(tmp_path),
+    )
+    pipeline = ScenePipeline(cfg)
+    assert pipeline._resolve_sdxl_checkpoint("anime") == "default.safetensors"
+    (tmp_path / "animagine.safetensors").write_bytes(b"fake")
+    assert pipeline._resolve_sdxl_checkpoint("anime") == "animagine.safetensors"
+
+
+def test_build_image_workflow_uses_override_checkpoint(tmp_path) -> None:
+    cfg = PipelineConfig(output_dir=tmp_path, sdxl_checkpoint="default.safetensors")
+    pipeline = ScenePipeline(cfg)
+    scene = Scene(
+        id=1, description="x", image_prompt="a cat",
+        video_prompt="x", duration_seconds=3.0,
+    )
+    wf = pipeline._build_image_workflow(
+        scene, "cinematic", seed=1, sdxl_checkpoint="animagine.safetensors"
+    )
+    ckpt = wf[orch._find_node_by_title(wf, "Load SDXL checkpoint")]["inputs"]["ckpt_name"]
+    assert ckpt == "animagine.safetensors"
+
+
 def test_negative_prompt_override_is_appended(tmp_path) -> None:
     """Global negative override from the UI must append to the scene's own
     negatives without losing the scenario-generated ones."""
@@ -501,95 +593,3 @@ def test_fast_preview_disabled_leaves_scenario_intact(tmp_path) -> None:
     out = pipeline._apply_fast_preview(scenario)
     assert len(out.scenes) == 5
     assert all(sc.duration_seconds == 6.0 for sc in out.scenes)
-
-
-def test_resolve_sdxl_checkpoint_returns_default_for_auto(tmp_path) -> None:
-    cfg = PipelineConfig(output_dir=tmp_path, sdxl_checkpoint="default.safetensors")
-    pipeline = ScenePipeline(cfg)
-    assert pipeline._resolve_sdxl_checkpoint("auto") == "default.safetensors"
-    assert pipeline._resolve_sdxl_checkpoint(None) == "default.safetensors"
-    assert pipeline._resolve_sdxl_checkpoint("") == "default.safetensors"
-
-
-def test_resolve_sdxl_checkpoint_maps_preset_to_file(tmp_path) -> None:
-    cfg = PipelineConfig(
-        output_dir=tmp_path,
-        sdxl_checkpoint="default.safetensors",
-        checkpoint_presets={
-            "cinematic_photo": "jugg.safetensors",
-            "anime": "animagine.safetensors",
-        },
-    )
-    pipeline = ScenePipeline(cfg)
-    assert pipeline._resolve_sdxl_checkpoint("cinematic_photo") == "jugg.safetensors"
-    assert pipeline._resolve_sdxl_checkpoint("anime") == "animagine.safetensors"
-
-
-def test_resolve_sdxl_checkpoint_falls_back_when_preset_missing_from_map(tmp_path) -> None:
-    cfg = PipelineConfig(
-        output_dir=tmp_path,
-        sdxl_checkpoint="default.safetensors",
-        checkpoint_presets={"anime": "animagine.safetensors"},
-    )
-    pipeline = ScenePipeline(cfg)
-    # 'photoreal' not in user's map → fall back to default, don't crash.
-    assert pipeline._resolve_sdxl_checkpoint("photoreal") == "default.safetensors"
-
-
-def test_resolve_sdxl_checkpoint_override_normalises_casing_and_separators(tmp_path) -> None:
-    """User-facing labels ('Cinematic Photo', 'cinematic-photo') must be
-    accepted so Gradio dropdowns and Telegram commands can push any
-    reasonable variant without silently degrading to the default."""
-    cfg = PipelineConfig(
-        output_dir=tmp_path,
-        sdxl_checkpoint="default.safetensors",
-        checkpoint_presets={"cinematic_photo": "jugg.safetensors"},
-    )
-    pipeline = ScenePipeline(cfg)
-    for sloppy in ("Cinematic Photo", "cinematic-photo", "  CINEMATIC_PHOTO  "):
-        pipeline.config.style_preset_override = sloppy
-        assert pipeline._resolve_sdxl_checkpoint("auto") == "jugg.safetensors", sloppy
-
-
-def test_resolve_sdxl_checkpoint_override_wins_over_scenario(tmp_path) -> None:
-    cfg = PipelineConfig(
-        output_dir=tmp_path,
-        sdxl_checkpoint="default.safetensors",
-        checkpoint_presets={
-            "anime": "animagine.safetensors",
-            "cinematic_photo": "jugg.safetensors",
-        },
-        style_preset_override="anime",
-    )
-    pipeline = ScenePipeline(cfg)
-    assert pipeline._resolve_sdxl_checkpoint("cinematic_photo") == "animagine.safetensors"
-
-
-def test_resolve_sdxl_checkpoint_degrades_when_file_missing_on_disk(tmp_path) -> None:
-    """With ``sdxl_checkpoints_dir`` configured, a preset pointing at a
-    missing file must fall back to the default — a broken download
-    should not kill the whole run."""
-    cfg = PipelineConfig(
-        output_dir=tmp_path,
-        sdxl_checkpoint="default.safetensors",
-        checkpoint_presets={"anime": "animagine.safetensors"},
-        sdxl_checkpoints_dir=str(tmp_path),
-    )
-    pipeline = ScenePipeline(cfg)
-    assert pipeline._resolve_sdxl_checkpoint("anime") == "default.safetensors"
-    (tmp_path / "animagine.safetensors").write_bytes(b"fake")
-    assert pipeline._resolve_sdxl_checkpoint("anime") == "animagine.safetensors"
-
-
-def test_build_image_workflow_uses_override_checkpoint(tmp_path) -> None:
-    cfg = PipelineConfig(output_dir=tmp_path, sdxl_checkpoint="default.safetensors")
-    pipeline = ScenePipeline(cfg)
-    scene = Scene(
-        id=1, description="x", image_prompt="a cat",
-        video_prompt="x", duration_seconds=3.0,
-    )
-    wf = pipeline._build_image_workflow(
-        scene, "cinematic", seed=1, sdxl_checkpoint="animagine.safetensors"
-    )
-    ckpt = wf[orch._find_node_by_title(wf, "Load SDXL checkpoint")]["inputs"]["ckpt_name"]
-    assert ckpt == "animagine.safetensors"
