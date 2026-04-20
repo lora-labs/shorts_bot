@@ -88,15 +88,18 @@ class PipelineConfig:
     use_ip_adapter: bool = True
     ip_adapter_model: str = "ip-adapter-plus_sdxl_vit-h.safetensors"
     clip_vision_model: str = "CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors"
-    # 0.7 is a good balance: strong enough that the character stays
-    # recognisable, soft enough that the scene-specific pose / setting
-    # still reads clearly. Tune if you want more rigid (↑) or more
-    # flexible (↓) consistency.
-    ip_adapter_weight: float = 0.7
-    # "linear" applies the embeds evenly across denoising steps.
-    # "style transfer" biases towards look over composition.
-    # "prompt is more important" lets the text prompt win ties.
-    ip_adapter_weight_type: str = "linear"
+    # 0.55 balances identity vs scene diversity. The previous default
+    # (0.7 + "linear") copied the reference's composition and lighting
+    # too strongly, so scenes 2+ looked almost identical to scene 1.
+    # Tune up (↑0.75) for tighter identity, down (↓0.4) for more
+    # compositional freedom per scene.
+    ip_adapter_weight: float = 0.55
+    # "strong style transfer" transfers identity + style but leaves the
+    # scene-specific composition (framing, pose, background) mostly to
+    # the text prompt — exactly what we want for multi-scene narratives.
+    # "linear" is the opposite: it copies composition too strongly and
+    # produces near-duplicate shots.
+    ip_adapter_weight_type: str = "strong style transfer"
     ip_adapter_start_at: float = 0.0
     ip_adapter_end_at: float = 1.0
 
