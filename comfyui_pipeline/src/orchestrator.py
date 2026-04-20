@@ -210,6 +210,8 @@ class ScenePipeline:
         self.client = ComfyClient(self.config.comfyui_url)
         self.config.output_dir = Path(self.config.output_dir)
         self.config.output_dir.mkdir(parents=True, exist_ok=True)
+        # Snapshot to keep fast_preview idempotent across repeated run() calls.
+        self._original_image_steps = self.config.image_steps
 
     # ---------- Stage 1: scenario ----------
 
@@ -577,7 +579,10 @@ class ScenePipeline:
         """
         if not self.config.fast_preview:
             return scenario
-        self.config.image_steps = max(1, self.config.image_steps // 2)
+        # Halve against the ORIGINAL step count (captured in __init__) so
+        # calling run() repeatedly on the same ScenePipeline with
+        # fast_preview=True doesn't compound (28 -> 14 -> 7 -> 3 -> 1).
+        self.config.image_steps = max(1, self._original_image_steps // 2)
         trimmed = scenario.scenes[:3]
         for sc in trimmed:
             sc.duration_seconds = min(sc.duration_seconds, 2.0)

@@ -473,6 +473,23 @@ def test_fast_preview_caps_scenes_to_three_and_duration_to_two(tmp_path) -> None
     assert pipeline.config.image_steps == 14
 
 
+def test_fast_preview_is_idempotent_across_repeated_calls(tmp_path) -> None:
+    """Repeated run()/_apply_fast_preview() calls on the same pipeline
+    must not keep halving image_steps (was 28 -> 14 -> 7 -> 3 -> 1)."""
+    cfg = PipelineConfig(
+        output_dir=tmp_path, fast_preview=True, image_steps=28,
+    )
+    pipeline = ScenePipeline(cfg)
+    scenes = [
+        Scene(id=i, description="x", image_prompt="x", video_prompt="x", duration_seconds=6.0)
+        for i in range(1, 5)
+    ]
+    for _ in range(5):
+        scenario = Scenario(title="t", style="s", character_sheet="c", scenes=list(scenes))
+        pipeline._apply_fast_preview(scenario)
+    assert pipeline.config.image_steps == 14
+
+
 def test_fast_preview_disabled_leaves_scenario_intact(tmp_path) -> None:
     cfg = PipelineConfig(output_dir=tmp_path, fast_preview=False)
     pipeline = ScenePipeline(cfg)
