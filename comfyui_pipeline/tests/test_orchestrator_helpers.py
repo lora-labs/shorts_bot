@@ -626,13 +626,39 @@ def test_build_image_workflow_chains_loras_through_ip_adapter(tmp_path) -> None:
     assert wf[pos_id]["inputs"]["clip"] == [lora_id, 1]
 
 
+# Valid ``weight_type`` values accepted by the IPAdapter Plus
+# ``IPAdapterAdvanced`` node. Kept in sync with the dropdown in
+# ``ComfyUI/custom_nodes/ComfyUI_IPAdapter_plus/IPAdapterPlus.py``.
+# Regression guard for PR #20 where ``"standard"`` was introduced but is
+# not in this list — the node rejected the /prompt payload at scene 2.
+VALID_IPA_WEIGHT_TYPES = {
+    "linear",
+    "ease in",
+    "ease out",
+    "ease in-out",
+    "reverse in-out",
+    "weak input",
+    "weak output",
+    "weak middle",
+    "strong middle",
+    "style transfer",
+    "composition",
+    "strong style transfer",
+    "style and composition",
+    "style transfer precise",
+    "composition precise",
+}
+
+
 def test_ipa_defaults_keep_identity_without_copying_composition(tmp_path) -> None:
-    """Regression for PR #20: 'strong style transfer' @ 0.55 from PR #15
-    lost face identity between scenes. The new defaults ('standard' @
-    0.65, end_at 0.8) restore identity lock while still letting later
-    denoising steps diverge per-scene (end_at < 1.0)."""
+    """Regression for PR #20 which set ``weight_type='standard'`` — a
+    value that IPAdapter Plus does not accept, so the node rejected the
+    prompt at scene 2 and IPA silently never applied. Current defaults
+    use ``'linear'`` (the valid neutral baseline) @ 0.65 with end_at 0.8
+    so identity locks early but per-scene details diverge late."""
     cfg = PipelineConfig(output_dir=tmp_path)
-    assert cfg.ip_adapter_weight_type == "standard"
+    assert cfg.ip_adapter_weight_type in VALID_IPA_WEIGHT_TYPES
+    assert cfg.ip_adapter_weight_type == "linear"
     assert cfg.ip_adapter_weight == 0.65
     assert cfg.ip_adapter_start_at == 0.0
     assert cfg.ip_adapter_end_at == 0.8
@@ -646,9 +672,30 @@ def test_ipa_defaults_keep_identity_without_copying_composition(tmp_path) -> Non
         scene, "cinematic", seed=1, reference_image="scene_01.png"
     )
     ipa = wf[orch._find_node_by_title(wf, "Apply IP-Adapter")]["inputs"]
-    assert ipa["weight_type"] == "standard"
+    assert ipa["weight_type"] in VALID_IPA_WEIGHT_TYPES
+    assert ipa["weight_type"] == "linear"
     assert ipa["weight"] == 0.65
     assert ipa["end_at"] == 0.8
+
+
+def test_ipa_workflow_json_uses_valid_weight_type() -> None:
+    """The checked-in ``scene_image_ipa_api.json`` embeds a default
+    ``weight_type`` that the orchestrator overrides at run time — but if
+    a dev runs the workflow bare (e.g. via ComfyUI UI) the default must
+    still be one of the accepted values."""
+    import json
+    from pathlib import Path as _P
+
+    wf_path = _P(__file__).resolve().parents[1] / "workflows" / "scene_image_ipa_api.json"
+    wf = json.loads(wf_path.read_text(encoding="utf-8"))
+    ipa_nodes = [
+        node for node in wf.values()
+        if isinstance(node, dict)
+        and node.get("class_type") == "IPAdapterAdvanced"
+    ]
+    assert ipa_nodes, "IPAdapterAdvanced node missing from IPA workflow JSON"
+    for node in ipa_nodes:
+        assert node["inputs"]["weight_type"] in VALID_IPA_WEIGHT_TYPES
 
 
 def test_build_image_workflow_without_loras_leaves_graph_untouched(tmp_path) -> None:

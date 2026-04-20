@@ -136,20 +136,27 @@ class PipelineConfig:
     use_ip_adapter: bool = True
     ip_adapter_model: str = "ip-adapter-plus_sdxl_vit-h.safetensors"
     clip_vision_model: str = "CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors"
-    # 0.65 + "standard" + end_at 0.8 is the sweet spot for keeping the
-    # same face/subject across scenes without copying the reference's
-    # framing. History of this tuning:
+    # 0.65 + "linear" + end_at 0.8 keeps the same face/subject across
+    # scenes without copying the reference's framing. History:
     #   - 0.7 + "linear" (initial): scenes were near-duplicates of scene 1
     #   - 0.55 + "strong style transfer" (PR #15): style locked but
-    #     identity drifted — faces of the protagonist changed every scene
-    #   - 0.65 + "standard" + end_at 0.8 (now): "standard" weight_type
-    #     preserves identity like the original "linear" but without the
-    #     composition copy; stopping IPA at 80% of sampling lets fine
-    #     detail (exact expression, pose, background) diverge per scene.
+    #     identity drifted — faces of the protagonist changed per scene
+    #   - 0.65 + "standard" + end_at 0.8 (PR #20): *attempted* fix, but
+    #     "standard" is not a valid value for the installed IPAdapter Plus
+    #     node (valid set is linear / ease in / ease out / ease in-out /
+    #     reverse in-out / weak input / weak output / weak middle /
+    #     strong middle / style transfer / composition / strong style
+    #     transfer / style and composition / style transfer precise /
+    #     composition precise). ComfyUI rejected the /prompt payload
+    #     starting at scene 2, so IPA never applied and identity drifted.
+    #   - 0.65 + "linear" + end_at 0.8 (now): valid value with the same
+    #     intent — linear is the neutral baseline that preserves identity
+    #     without the composition-copy of high weight; end_at 0.8 lets
+    #     the last 20% of denoising diverge per-scene.
     # Tune up (↑0.8) for tighter identity (risk: scenes look similar),
     # down (↓0.5) for more per-scene freedom (risk: face drifts).
     ip_adapter_weight: float = 0.65
-    ip_adapter_weight_type: str = "standard"
+    ip_adapter_weight_type: str = "linear"
     ip_adapter_start_at: float = 0.0
     # Stop IPA at 80% so the last 20% of denoising is prompt-only —
     # avoids the "every scene has the same micro-expression" artifact
