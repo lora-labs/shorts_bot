@@ -170,6 +170,11 @@ class PipelineConfig:
     # means "let Qwen decide" (legacy behaviour).
     scenes_count_hint: int | None = None
     scene_duration_hint: float | None = None
+    # Target TOTAL video length in seconds (3-20 from the Telegram
+    # picker). Qwen decides per-scene split unless ``scene_duration_hint``
+    # or ``scenes_count_hint`` pin either axis; with total+count it infers
+    # duration, with total+duration it infers count.
+    total_duration_hint: float | None = None
 
     # Ask ComfyUI to evict loaded models (via POST /free) at specific
     # stage boundaries. Needed on low-VRAM setups where SDXL+IP-Adapter
@@ -720,6 +725,12 @@ class ScenePipeline:
         d = self.config.scene_duration_hint
         if d is not None and d > 0:
             hints.append(f"Each scene should be about {d:g} seconds long.")
+        total = self.config.total_duration_hint
+        if total is not None and total > 0:
+            hints.append(
+                f"Total video length should be about {total:g} seconds "
+                "(split across scenes as you see fit)."
+            )
         if not hints:
             return idea
         return idea.strip() + "\n\nUser preferences:\n- " + "\n- ".join(hints)

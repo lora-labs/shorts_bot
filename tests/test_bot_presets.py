@@ -1,9 +1,14 @@
-"""Tests for the Telegram bot preset registry & config routing.
+"""Tests for the Telegram bot preset registry, config routing, and the
+multi-step conversation wizard.
 
-The bot itself is asyncio + python-telegram-bot which is awkward to unit-test
-end-to-end, but the preset registry and ``_build_config`` are pure-Python
-helpers worth locking down: they are what guarantees a ``/generate_anime``
-command actually causes the orchestrator to load the anime SDXL checkpoint.
+The bot itself is asyncio + python-telegram-bot which is awkward to
+unit-test end-to-end, but everything that actually decides behaviour —
+the preset registry, ``_build_config``, command→preset mapping, inline
+idea extraction, and the wizard's keyboard factories — is pure Python
+and worth locking down. This file is what guarantees a
+``/generate_anime`` command actually causes the orchestrator to load
+the anime SDXL checkpoint, and that the new 3-20 s duration picker
+actually flows into ``PipelineConfig.total_duration_hint``.
 """
 from __future__ import annotations
 
@@ -19,6 +24,11 @@ if str(ROOT) not in sys.path:
 pytest.importorskip("telegram")
 
 import bot  # noqa: E402
+
+
+# --------------------------------------------------------------------------- #
+# Preset registry
+# --------------------------------------------------------------------------- #
 
 
 def test_preset_registry_has_all_expected_keys() -> None:
@@ -75,14 +85,29 @@ def test_build_config_skips_unknown_fields_gracefully(tmp_path) -> None:
     assert not hasattr(cfg, "nonexistent_field_xyz")
 
 
-class _FakeMessage:
-    def __init__(self, text: str) -> None:
-        self.text = text
+def test_build_config_propagates_total_duration_and_scenes_count(tmp_path) -> None:
+    """The wizard collects total_duration + scenes_count and passes them
+    through to PipelineConfig so Qwen actually receives the hint."""
+    cfg = bot._build_config(
+        tmp_path, bot.PRESETS["cinematic"],
+        total_duration=12.0, scenes_count=4,
+    )
+    assert cfg.total_duration_hint == 12.0
+    assert cfg.scenes_count_hint == 4
 
 
-class _FakeUpdate:
-    def __init__(self, text: str) -> None:
-        self.message = _FakeMessage(text)
+def test_build_config_leaves_hints_none_when_auto(tmp_path) -> None:
+    cfg = bot._build_config(
+        tmp_path, bot.PRESETS["default"],
+        total_duration=None, scenes_count=None,
+    )
+    assert cfg.total_duration_hint is None
+    assert cfg.scenes_count_hint is None
+
+
+# --------------------------------------------------------------------------- #
+# Command → preset routing
+# --------------------------------------------------------------------------- #
 
 
 @pytest.mark.parametrize(
@@ -97,18 +122,11 @@ class _FakeUpdate:
         ("/generate_fast", "fast"),
         ("/generate_unknown", "default"),  # unknown suffix -> default, never crash
         ("/generate_anime@mybotname", "anime"),  # group-chat @-suffix is stripped
+        ("/generate_anime ninja cat in Tokyo", "anime"),  # inline idea keeps preset
     ],
 )
-def test_preset_from_update_routes_command_to_preset(command: str, expected_key: str) -> None:
-    preset = bot._preset_from_update(_FakeUpdate(command))
-    assert preset is bot.PRESETS[expected_key]
-
-
-def test_preset_from_update_with_inline_idea_still_picks_preset() -> None:
-    """``/generate_anime ninja cat`` must still resolve to the anime preset,
-    not fall back to default because of the trailing text."""
-    preset = bot._preset_from_update(_FakeUpdate("/generate_anime ninja cat in Tokyo"))
-    assert preset is bot.PRESETS["anime"]
+def test_preset_key_from_command(command: str, expected_key: str) -> None:
+    assert bot._preset_key_from_command(command) == expected_key
 
 
 @pytest.mark.parametrize(
@@ -119,7 +137,113 @@ def test_preset_from_update_with_inline_idea_still_picks_preset() -> None:
         ("/generate_anime", ""),
         ("/start", ""),
         ("just a plain message", "just a plain message"),
+        ("", ""),
     ],
 )
 def test_inline_idea_extraction(text: str, expected: str) -> None:
-    assert bot._inline_idea(_FakeUpdate(text)) == expected
+    assert bot._inline_idea(text) == expected
+
+
+# --------------------------------------------------------------------------- #
+# Wizard keyboards
+# --------------------------------------------------------------------------- #
+
+
+def test_preset_keyboard_exposes_every_listed_preset() -> None:
+    """The preset picker must show exactly the presets listed in
+    ``PRESET_PICKER_ORDER`` — adding a new preset without wiring it into
+    the picker order is a common mistake, this test catches it."""
+    kb = bot._preset_keyboard()
+    keys_on_buttons: list[str] = []
+    for row in kb.inline_keyboard:
+        for btn in row:
+            assert btn.callback_data.startswith("preset:")
+            keys_on_buttons.append(btn.callback_data.split(":", 1)[1])
+    assert keys_on_buttons == list(bot.PRESET_PICKER_ORDER)
+    for key in keys_on_buttons:
+        assert key in bot.PRESETS
+
+
+def test_duration_keyboard_covers_3_to_20_seconds_plus_auto() -> None:
+    """User-request-driven regression: the duration picker must offer
+    3-20 s and an 'Auto' escape hatch."""
+    kb = bot._duration_keyboard()
+    callback_values: list[str] = []
+    for row in kb.inline_keyboard:
+        for btn in row:
+            assert btn.callback_data.startswith("dur:")
+            callback_values.append(btn.callback_data.split(":", 1)[1])
+    assert "3" in callback_values
+    assert "20" in callback_values
+    assert "auto" in callback_values
+    # Every numeric option must parse as a float in [3, 20].
+    numeric = [float(v) for v in callback_values if v != "auto"]
+    assert min(numeric) >= 3.0
+    assert max(numeric) <= 20.0
+
+
+def test_scenes_keyboard_covers_expected_counts_plus_auto() -> None:
+    kb = bot._scenes_keyboard()
+    values: list[str] = []
+    for row in kb.inline_keyboard:
+        for btn in row:
+            assert btn.callback_data.startswith("scenes:")
+            values.append(btn.callback_data.split(":", 1)[1])
+    assert {"3", "4", "5", "6", "auto"}.issubset(set(values))
+
+
+def test_confirm_keyboard_offers_yes_no() -> None:
+    kb = bot._confirm_keyboard()
+    callbacks = [
+        btn.callback_data
+        for row in kb.inline_keyboard
+        for btn in row
+    ]
+    assert "confirm:yes" in callbacks
+    assert "confirm:no" in callbacks
+
+
+# --------------------------------------------------------------------------- #
+# Summary rendering
+# --------------------------------------------------------------------------- #
+
+
+def test_summary_renders_all_user_selections() -> None:
+    data = {
+        "preset": bot.PRESETS["cinematic"],
+        "idea": "rainy Tokyo ninja",
+        "total_duration": 10.0,
+        "scenes_count": 4,
+    }
+    text = bot._summary(data)
+    assert "Cinematic photo" in text
+    assert "rainy Tokyo ninja" in text
+    assert "10 s" in text
+    assert "4" in text
+
+
+def test_summary_renders_auto_when_hints_missing() -> None:
+    data = {
+        "preset": bot.PRESETS["default"],
+        "idea": "anything",
+        "total_duration": None,
+        "scenes_count": None,
+    }
+    text = bot._summary(data)
+    assert "auto" in text.lower()
+
+
+# --------------------------------------------------------------------------- #
+# Conversation handler wiring
+# --------------------------------------------------------------------------- #
+
+
+def test_conversation_handler_has_all_wizard_states() -> None:
+    """The ConversationHandler must declare handlers for every wizard
+    state so users never hit a dead end."""
+    conv = bot._build_conv_handler()
+    assert bot.CHOOSE_PRESET in conv.states
+    assert bot.AWAIT_IDEA in conv.states
+    assert bot.CHOOSE_DURATION in conv.states
+    assert bot.CHOOSE_SCENES in conv.states
+    assert bot.CONFIRM in conv.states
