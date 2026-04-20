@@ -320,7 +320,16 @@ class ScenePipeline:
         ``config.sdxl_checkpoint`` and log a warning so the user can tell
         routing was bypassed.
         """
-        override = (self.config.style_preset_override or "").strip().lower()
+        # Mirror Scenario._normalize_preset so callers can pass sloppy
+        # casing / spaces / hyphens from UI labels without silently
+        # missing the checkpoint_presets key.
+        override = (
+            (self.config.style_preset_override or "")
+            .strip()
+            .lower()
+            .replace("-", "_")
+            .replace(" ", "_")
+        )
         preset = override if override and override != "auto" else (scenario_preset or "auto")
         if preset == "auto" or not preset:
             return self.config.sdxl_checkpoint
