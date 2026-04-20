@@ -44,36 +44,30 @@
     "_meta": { "title": "Video negative prompt" }
   },
   "7": {
-    "class_type": "LTXVConditioning",
+    "class_type": "LTXVImgToVideo",
     "inputs": {
       "positive": ["5", 0],
       "negative": ["6", 0],
+      "vae": ["1", 2],
+      "image": ["4", 0],
+      "width": 960,
+      "height": 544,
+      "length": 121,
+      "batch_size": 1,
+      "strength": 1.0
+    },
+    "_meta": { "title": "LTX img-to-video" }
+  },
+  "8": {
+    "class_type": "LTXVConditioning",
+    "inputs": {
+      "positive": ["7", 0],
+      "negative": ["7", 1],
       "frame_rate": 25.0
     },
     "_meta": { "title": "LTX conditioning" }
   },
-  "8": {
-    "class_type": "EmptyLTXVLatentVideo",
-    "inputs": {
-      "width": 960,
-      "height": 544,
-      "length": 121,
-      "batch_size": 1
-    },
-    "_meta": { "title": "LTX empty latent" }
-  },
   "9": {
-    "class_type": "LTXVImgToVideoConditionOnly",
-    "inputs": {
-      "vae": ["1", 2],
-      "image": ["4", 0],
-      "latent": ["8", 0],
-      "strength": 1.0,
-      "bypass": false
-    },
-    "_meta": { "title": "LTX img-to-video" }
-  },
-  "10": {
     "class_type": "LTXVScheduler",
     "inputs": {
       "steps": 15,
@@ -81,61 +75,61 @@
       "base_shift": 0.95,
       "stretch": true,
       "terminal": 0.1,
-      "latent": ["9", 0]
+      "latent": ["7", 2]
     },
     "_meta": { "title": "LTX scheduler" }
   },
-  "11": {
+  "10": {
     "class_type": "KSamplerSelect",
     "inputs": { "sampler_name": "euler" },
     "_meta": { "title": "Sampler select" }
   },
-  "12": {
+  "11": {
     "class_type": "RandomNoise",
     "inputs": { "noise_seed": 0 },
     "_meta": { "title": "Random noise" }
   },
-  "13": {
+  "12": {
     "class_type": "CFGGuider",
     "inputs": {
       "model": ["3", 0],
-      "positive": ["7", 0],
-      "negative": ["7", 1],
+      "positive": ["8", 0],
+      "negative": ["8", 1],
       "cfg": 1.0
     },
     "_meta": { "title": "CFG guider" }
   },
-  "14": {
+  "13": {
     "class_type": "SamplerCustomAdvanced",
     "inputs": {
-      "noise": ["12", 0],
-      "guider": ["13", 0],
-      "sampler": ["11", 0],
-      "sigmas": ["10", 0],
-      "latent_image": ["9", 0]
+      "noise": ["11", 0],
+      "guider": ["12", 0],
+      "sampler": ["10", 0],
+      "sigmas": ["9", 0],
+      "latent_image": ["7", 2]
     },
     "_meta": { "title": "Sample video latent" }
   },
-  "15": {
+  "14": {
     "class_type": "VAEDecode",
     "inputs": {
-      "samples": ["14", 0],
+      "samples": ["13", 0],
       "vae": ["1", 2]
     },
     "_meta": { "title": "Decode frames" }
   },
-  "16": {
+  "15": {
     "class_type": "CreateVideo",
     "inputs": {
-      "images": ["15", 0],
+      "images": ["14", 0],
       "fps": 25.0
     },
     "_meta": { "title": "Create video from frames" }
   },
-  "17": {
+  "16": {
     "class_type": "SaveVideo",
     "inputs": {
-      "video": ["16", 0],
+      "video": ["15", 0],
       "filename_prefix": "scene_video",
       "format": "mp4",
       "codec": "h264"

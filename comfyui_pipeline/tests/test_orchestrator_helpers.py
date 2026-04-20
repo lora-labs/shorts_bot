@@ -92,10 +92,15 @@ def test_build_video_workflow_wires_ltx23_nodes(tmp_path) -> None:
     assert lora["inputs"]["lora_name"] == "ltx23-lora.safetensors"
     assert lora["inputs"]["strength_model"] == 0.7
 
-    # Image load + latent dims
+    # Image load + latent dims. Builtin LTXVImgToVideo owns width/height/length
+    # (the old EmptyLTXVLatentVideo node is gone — the img2video node produces
+    # the latent directly from the keyframe image).
     assert wf[orch._find_node_by_title(wf, "Load keyframe image")]["inputs"]["image"] == "uploads/keyframe.png"
-    latent = wf[orch._find_node_by_title(wf, "LTX empty latent")]["inputs"]
-    assert latent["length"] == pipeline._frames_for_duration(3.0)
+    i2v = wf[orch._find_node_by_title(wf, "LTX img-to-video")]
+    assert i2v["class_type"] == "LTXVImgToVideo"
+    assert i2v["inputs"]["length"] == pipeline._frames_for_duration(3.0)
+    assert i2v["inputs"]["width"] == cfg.video_width
+    assert i2v["inputs"]["height"] == cfg.video_height
 
     # Sampler stack
     sampler_adv = wf[orch._find_node_by_title(wf, "Sample video latent")]
@@ -152,6 +157,36 @@ def test_queue_prompt_surfaces_validation_body_on_400() -> None:
     msg = str(excinfo.value)
     assert "400" in msg
     assert "LTXVImgToVideoConditionOnly" in msg
+
+
+def test_qwen_node_forces_local_files_only_for_local_paths(tmp_path) -> None:
+    """If ``model_name_or_path`` points at a real on-disk directory, the
+    Qwen node must pass ``local_files_only=True`` to transformers so it
+    never tries to contact huggingface.co (which re-downloads shards if
+    the local snapshot doesn't match the exact revision HF expects, or
+    stalls on xet-token requests behind a VPN).
+
+    For a bare HF repo id (``Qwen/Qwen3-8B``), ``local_files_only`` must
+    stay False so a fresh install can still download the model."""
+    import sys
+    from pathlib import Path
+
+    # Tests run from repo root; make sure the custom_nodes dir is on sys.path
+    # even if conftest hasn't done it.
+    custom_nodes = Path(__file__).parent.parent / "custom_nodes" / "scene_pipeline"
+    if str(custom_nodes) not in sys.path:
+        sys.path.insert(0, str(custom_nodes))
+
+    import qwen_node
+
+    # Non-existent path / bare HF id → not treated as local.
+    assert qwen_node._looks_like_local_path("Qwen/Qwen3-8B") is False
+    assert qwen_node._looks_like_local_path("not/a/real/path") is False
+
+    # Real on-disk dir → treated as local.
+    local_dir = tmp_path / "Qwen3-8B"
+    local_dir.mkdir()
+    assert qwen_node._looks_like_local_path(str(local_dir)) is True
 
 
 def test_pipeline_config_defaults_are_low_vram_friendly() -> None:

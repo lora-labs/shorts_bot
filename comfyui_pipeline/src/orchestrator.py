@@ -268,7 +268,11 @@ class ScenePipeline:
         pos_id = _find_node_by_title(wf, "Video positive prompt")
         neg_id = _find_node_by_title(wf, "Video negative prompt")
         cond_id = _find_node_by_title(wf, "LTX conditioning")
-        latent_id = _find_node_by_title(wf, "LTX empty latent")
+        # Builtin LTXVImgToVideo now subsumes both the old
+        # LTXVImgToVideoConditionOnly node and EmptyLTXVLatentVideo — it takes
+        # positive/negative/vae/image and emits positive/negative/latent in
+        # one shot, sized by width/height/length inputs on the same node.
+        i2v_id = _find_node_by_title(wf, "LTX img-to-video")
         sched_id = _find_node_by_title(wf, "LTX scheduler")
         noise_id = _find_node_by_title(wf, "Random noise")
         guider_id = _find_node_by_title(wf, "CFG guider")
@@ -289,9 +293,9 @@ class ScenePipeline:
         wf[neg_id]["inputs"]["text"] = scene.negative_prompt
 
         wf[cond_id]["inputs"]["frame_rate"] = self.config.video_fps
-        wf[latent_id]["inputs"]["width"] = self.config.video_width
-        wf[latent_id]["inputs"]["height"] = self.config.video_height
-        wf[latent_id]["inputs"]["length"] = self._frames_for_duration(scene.duration_seconds)
+        wf[i2v_id]["inputs"]["width"] = self.config.video_width
+        wf[i2v_id]["inputs"]["height"] = self.config.video_height
+        wf[i2v_id]["inputs"]["length"] = self._frames_for_duration(scene.duration_seconds)
         wf[sched_id]["inputs"]["steps"] = self.config.video_steps
         wf[noise_id]["inputs"]["noise_seed"] = seed
         wf[guider_id]["inputs"]["cfg"] = self.config.video_cfg
