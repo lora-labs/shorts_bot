@@ -58,7 +58,7 @@
       "image": ["11", 0],
       "clip_vision": ["9", 0],
       "weight": 0.65,
-      "weight_type": "standard",
+      "weight_type": "linear",
       "combine_embeds": "concat",
       "start_at": 0.0,
       "end_at": 0.8,
