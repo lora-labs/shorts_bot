@@ -62,10 +62,15 @@ class PipelineConfig:
     # the following SDXL + LTX stages.
     qwen_keep_loaded: bool = False
 
-    image_width: int = 1024
-    image_height: int = 576
-    video_width: int = 960
-    video_height: int = 544
+    # Vertical 9:16 (TikTok / Reels / Shorts). Both SDXL and LTX-2.3
+    # accept these dimensions natively — 768x1344 is one of SDXL's
+    # trained aspect buckets, and LTX needs dims divisible by 32
+    # (544 = 32*17, 960 = 32*30) with a frames+1 length that's a
+    # multiple of 8 (handled by _frames_for_duration).
+    image_width: int = 768
+    image_height: int = 1344
+    video_width: int = 544
+    video_height: int = 960
     video_length_frames: int = 121
     video_fps: float = 25.0
 
@@ -269,7 +274,7 @@ class ScenePipeline:
         wf_name = "scene_image_ipa_api.json" if use_ipa else "scene_image_api.json"
         wf = copy.deepcopy(_load_workflow(wf_name))
         ckpt_id = _find_node_by_title(wf, "Load SDXL checkpoint")
-        latent_id = _find_node_by_title(wf, "Empty latent 16:9")
+        latent_id = _find_node_by_title(wf, "Empty latent 9:16")
         pos_id = _find_node_by_title(wf, "Positive prompt")
         neg_id = _find_node_by_title(wf, "Negative prompt")
         sampler_id = _find_node_by_title(wf, "Sample")

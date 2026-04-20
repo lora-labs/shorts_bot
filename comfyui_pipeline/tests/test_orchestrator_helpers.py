@@ -101,6 +101,32 @@ def test_video_prompt_prepends_character_sheet(tmp_path) -> None:
     assert vid_pos.index(sheet) < vid_pos.index("skateboard rolls")
 
 
+def test_default_config_is_vertical_9_16(tmp_path) -> None:
+    """Output targets TikTok / Reels / Shorts — vertical 9:16 by default."""
+    cfg = PipelineConfig(output_dir=tmp_path)
+    assert cfg.image_height > cfg.image_width
+    assert cfg.video_height > cfg.video_width
+    # Both SDXL and LTX need dims that respect their bucket/stride rules.
+    assert cfg.image_width % 64 == 0 and cfg.image_height % 64 == 0
+    assert cfg.video_width % 32 == 0 and cfg.video_height % 32 == 0
+
+
+def test_image_workflow_wires_9_16_latent_dims(tmp_path) -> None:
+    cfg = PipelineConfig(output_dir=tmp_path, image_width=768, image_height=1344)
+    pipeline = ScenePipeline(cfg)
+    scene = Scene(
+        id=1,
+        description="x",
+        image_prompt="a lighthouse",
+        video_prompt="x",
+        duration_seconds=3.0,
+    )
+    wf = pipeline._build_image_workflow(scene, "cinematic", seed=1)
+    latent = wf[orch._find_node_by_title(wf, "Empty latent 9:16")]["inputs"]
+    assert latent["width"] == 768
+    assert latent["height"] == 1344
+
+
 def test_scene1_uses_plain_workflow_no_ip_adapter(tmp_path) -> None:
     """Scene 1 has no reference image yet — must fall back to the plain
     SDXL workflow without IPAdapter nodes."""

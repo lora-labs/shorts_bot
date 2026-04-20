@@ -6,8 +6,8 @@
   },
   "2": {
     "class_type": "EmptyLatentImage",
-    "inputs": { "width": 1024, "height": 576, "batch_size": 1 },
-    "_meta": { "title": "Empty latent 16:9" }
+    "inputs": { "width": 768, "height": 1344, "batch_size": 1 },
+    "_meta": { "title": "Empty latent 9:16" }
   },
   "3": {
     "class_type": "CLIPTextEncode",
