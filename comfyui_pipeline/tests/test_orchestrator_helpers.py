@@ -455,7 +455,9 @@ def test_apply_idea_hints_is_noop_when_no_hints(tmp_path) -> None:
 
 
 def test_fast_preview_caps_scenes_to_three_and_duration_to_two(tmp_path) -> None:
-    cfg = PipelineConfig(output_dir=tmp_path, fast_preview=True)
+    cfg = PipelineConfig(
+        output_dir=tmp_path, fast_preview=True, image_steps=28,
+    )
     pipeline = ScenePipeline(cfg)
     scenes = [
         Scene(id=i, description="x", image_prompt="x", video_prompt="x", duration_seconds=6.0)
@@ -467,6 +469,8 @@ def test_fast_preview_caps_scenes_to_three_and_duration_to_two(tmp_path) -> None
     trimmed = pipeline._apply_fast_preview(scenario)
     assert len(trimmed.scenes) == 3
     assert all(sc.duration_seconds <= 2.0 for sc in trimmed.scenes)
+    # Docstring contract: fast_preview also halves SDXL steps.
+    assert pipeline.config.image_steps == 14
 
 
 def test_fast_preview_disabled_leaves_scenario_intact(tmp_path) -> None:
