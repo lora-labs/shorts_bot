@@ -47,7 +47,7 @@ The Telegram bot lives at the repo root as `bot.py`.
 ## Prerequisites
 
 * A running **ComfyUI** with official LTX-2 support (uses core nodes
-  `LTXAVTextEncoderLoader`, `SamplerCustomAdvanced`, `LTXVConditioning`, etc.).
+  `CLIPLoader` (type=`ltxv`), `SamplerCustomAdvanced`, `LTXVConditioning`, etc.).
   Upgrade to the latest ComfyUI and install **ComfyUI-LTXVideo** for the
   custom LTX helper nodes (not strictly required for this pipeline, but handy).
 * **FFmpeg** in `PATH` — the orchestrator uses it to concatenate per-scene
@@ -214,7 +214,7 @@ distilled I2V graph (video-only, no audio):
 CheckpointLoaderSimple (LTX-2.3) ──► (MODEL) ──► LoraLoaderModelOnly (distilled LoRA)
                                                                       │
                                                                       ▼
-LTXAVTextEncoderLoader (Gemma 3 12B) ──► (CLIP) ──► CLIPTextEncode (+/−)
+CLIPLoader (Gemma 3 12B, type=ltxv) ──► (CLIP) ──► CLIPTextEncode (+/−)
                                                               │
 LoadImage ──────────────────────────────► LTXVImgToVideo (width/height/length, strength)
                                                               │

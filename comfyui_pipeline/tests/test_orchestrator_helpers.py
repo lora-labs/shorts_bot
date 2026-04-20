@@ -84,9 +84,9 @@ def test_build_video_workflow_wires_ltx23_nodes(tmp_path) -> None:
     # Checkpoint, encoder, LoRA wiring
     assert wf[orch._find_node_by_title(wf, "Load LTX checkpoint")]["inputs"]["ckpt_name"] == "ltx23.safetensors"
     enc = wf[orch._find_node_by_title(wf, "LTX text encoder")]
-    assert enc["class_type"] == "LTXAVTextEncoderLoader"
-    assert enc["inputs"]["text_encoder"] == "gemma3-12b.safetensors"
-    assert enc["inputs"]["ckpt_name"] == "ltx23.safetensors"
+    assert enc["class_type"] == "CLIPLoader"
+    assert enc["inputs"]["clip_name"] == "gemma3-12b.safetensors"
+    assert enc["inputs"]["type"] == "ltxv"
     lora = wf[orch._find_node_by_title(wf, "Apply LTX distilled LoRA")]
     assert lora["class_type"] == "LoraLoaderModelOnly"
     assert lora["inputs"]["lora_name"] == "ltx23-lora.safetensors"

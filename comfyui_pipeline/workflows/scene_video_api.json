@@ -5,10 +5,10 @@
     "_meta": { "title": "Load LTX checkpoint" }
   },
   "2": {
-    "class_type": "LTXAVTextEncoderLoader",
+    "class_type": "CLIPLoader",
     "inputs": {
-      "text_encoder": "comfy_gemma_3_12B_it.safetensors",
-      "ckpt_name": "ltx-2.3-22b-distilled-1.1.safetensors",
+      "clip_name": "comfy_gemma_3_12B_it.safetensors",
+      "type": "ltxv",
       "device": "default"
     },
     "_meta": { "title": "LTX text encoder" }
