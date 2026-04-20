@@ -404,3 +404,100 @@ def test_concat_final_video_invokes_ffmpeg(tmp_path, monkeypatch) -> None:
     lst = (tmp_path / "concat_list.txt").read_text()
     assert str(video_1.resolve()) in lst
     assert str(video_2.resolve()) in lst
+
+
+def test_negative_prompt_override_is_appended(tmp_path) -> None:
+    """Global negative override from the UI must append to the scene's own
+    negatives without losing the scenario-generated ones."""
+    cfg = PipelineConfig(
+        output_dir=tmp_path,
+        negative_prompt_override="extra fingers, watermark",
+    )
+    pipeline = ScenePipeline(cfg)
+    scene = Scene(
+        id=1,
+        description="x",
+        image_prompt="a cat",
+        video_prompt="x",
+        duration_seconds=3.0,
+        negative_prompt="low quality, blurry",
+    )
+    merged = pipeline._compose_negative_prompt(scene)
+    assert "low quality, blurry" in merged
+    assert "extra fingers, watermark" in merged
+    # Scene's own negatives must come first (they are scene-specific).
+    assert merged.index("low quality") < merged.index("extra fingers")
+
+
+def test_negative_override_survives_empty_scene_negative(tmp_path) -> None:
+    cfg = PipelineConfig(output_dir=tmp_path, negative_prompt_override="text, hands")
+    pipeline = ScenePipeline(cfg)
+    scene = Scene(
+        id=1, description="x", image_prompt="a cat",
+        video_prompt="x", duration_seconds=3.0, negative_prompt="",
+    )
+    assert pipeline._compose_negative_prompt(scene) == "text, hands"
+
+
+def test_apply_idea_hints_injects_scene_count_and_duration(tmp_path) -> None:
+    cfg = PipelineConfig(output_dir=tmp_path, scenes_count_hint=6, scene_duration_hint=5.0)
+    pipeline = ScenePipeline(cfg)
+    out = pipeline._apply_idea_hints("a cat plays chess")
+    assert "a cat plays chess" in out
+    assert "6 scenes" in out
+    assert "5 seconds" in out
+
+
+def test_apply_idea_hints_is_noop_when_no_hints(tmp_path) -> None:
+    cfg = PipelineConfig(output_dir=tmp_path)
+    pipeline = ScenePipeline(cfg)
+    assert pipeline._apply_idea_hints("hello") == "hello"
+
+
+def test_fast_preview_caps_scenes_to_three_and_duration_to_two(tmp_path) -> None:
+    cfg = PipelineConfig(
+        output_dir=tmp_path, fast_preview=True, image_steps=28,
+    )
+    pipeline = ScenePipeline(cfg)
+    scenes = [
+        Scene(id=i, description="x", image_prompt="x", video_prompt="x", duration_seconds=6.0)
+        for i in range(1, 7)
+    ]
+    scenario = Scenario(
+        title="t", style="s", character_sheet="c", scenes=scenes,
+    )
+    trimmed = pipeline._apply_fast_preview(scenario)
+    assert len(trimmed.scenes) == 3
+    assert all(sc.duration_seconds <= 2.0 for sc in trimmed.scenes)
+    # Docstring contract: fast_preview also halves SDXL steps.
+    assert pipeline.config.image_steps == 14
+
+
+def test_fast_preview_is_idempotent_across_repeated_calls(tmp_path) -> None:
+    """Repeated run()/_apply_fast_preview() calls on the same pipeline
+    must not keep halving image_steps (was 28 -> 14 -> 7 -> 3 -> 1)."""
+    cfg = PipelineConfig(
+        output_dir=tmp_path, fast_preview=True, image_steps=28,
+    )
+    pipeline = ScenePipeline(cfg)
+    scenes = [
+        Scene(id=i, description="x", image_prompt="x", video_prompt="x", duration_seconds=6.0)
+        for i in range(1, 5)
+    ]
+    for _ in range(5):
+        scenario = Scenario(title="t", style="s", character_sheet="c", scenes=list(scenes))
+        pipeline._apply_fast_preview(scenario)
+    assert pipeline.config.image_steps == 14
+
+
+def test_fast_preview_disabled_leaves_scenario_intact(tmp_path) -> None:
+    cfg = PipelineConfig(output_dir=tmp_path, fast_preview=False)
+    pipeline = ScenePipeline(cfg)
+    scenes = [
+        Scene(id=i, description="x", image_prompt="x", video_prompt="x", duration_seconds=6.0)
+        for i in range(1, 6)
+    ]
+    scenario = Scenario(title="t", style="s", character_sheet="c", scenes=scenes)
+    out = pipeline._apply_fast_preview(scenario)
+    assert len(out.scenes) == 5
+    assert all(sc.duration_seconds == 6.0 for sc in out.scenes)
