@@ -47,6 +47,31 @@ class PipelineConfig:
     comfyui_url: str = "http://127.0.0.1:8188"
     output_dir: Path = Path("output/scenes")
     sdxl_checkpoint: str = "sd_xl_base_1.0.safetensors"
+    # Style-preset routing table. Qwen tags each scenario with a preset
+    # ('cinematic_photo', 'anime', etc.); the orchestrator looks the tag
+    # up here to pick which SDXL checkpoint renders the scenes. Files
+    # that are not present on disk are skipped gracefully (the
+    # configured ``sdxl_checkpoint`` is used as fallback). Override this
+    # dict from a downstream call-site (e.g. CLI, Gradio) to match your
+    # local ``models/checkpoints/`` layout.
+    checkpoint_presets: dict[str, str] = field(
+        default_factory=lambda: {
+            "cinematic_photo": "juggernautXL_v9.safetensors",
+            "photoreal": "realvisXL_v50.safetensors",
+            "anime": "animagineXL_40.safetensors",
+            "illustration": "dreamshaperXL_v2Turbo.safetensors",
+        }
+    )
+    # Optional user override: when set, wins over the scenario's own
+    # ``style_preset``. Gradio / Telegram bot expose this as a dropdown
+    # so the user can force a specific look. ``None`` or ``"auto"``
+    # means "respect what Qwen picked".
+    style_preset_override: str | None = None
+    # Directory on the ComfyUI machine that contains SDXL checkpoints.
+    # Used to verify a preset-selected file exists before switching to
+    # it. ``None`` disables the check (the orchestrator trusts the user
+    # and lets ComfyUI raise a clearer error if the file is missing).
+    sdxl_checkpoints_dir: str | None = None
     ltx_checkpoint: str = "ltx-2.3-22b-distilled-fp8.safetensors"
     ltx_lora: str = "ltx-2.3-22b-distilled-lora-384.safetensors"
     ltx_lora_strength: float = 1.0
@@ -287,6 +312,50 @@ class ScenePipeline:
             parts.append(global_style.strip())
         return ", ".join(parts)
 
+    def _resolve_sdxl_checkpoint(self, scenario_preset: str | None) -> str:
+        """Decide which SDXL checkpoint file to load for this run.
+
+        Priority:
+          1. ``config.style_preset_override`` (user-forced from UI / bot)
+          2. Scenario's own ``style_preset`` (emitted by Qwen)
+          3. ``config.sdxl_checkpoint`` fallback
+
+        If the resolved preset's file is declared missing by the optional
+        ``config.sdxl_checkpoints_dir`` existence check, we fall back to
+        ``config.sdxl_checkpoint`` and log a warning so the user can tell
+        routing was bypassed.
+        """
+        # Mirror Scenario._normalize_preset so callers can pass sloppy
+        # casing / spaces / hyphens from UI labels without silently
+        # missing the checkpoint_presets key.
+        override = (
+            (self.config.style_preset_override or "")
+            .strip()
+            .lower()
+            .replace("-", "_")
+            .replace(" ", "_")
+        )
+        preset = override if override and override != "auto" else (scenario_preset or "auto")
+        if preset == "auto" or not preset:
+            return self.config.sdxl_checkpoint
+        filename = self.config.checkpoint_presets.get(preset)
+        if not filename:
+            log.warning(
+                "Style preset %r is not mapped in checkpoint_presets; "
+                "using configured default %r.", preset, self.config.sdxl_checkpoint,
+            )
+            return self.config.sdxl_checkpoint
+        if self.config.sdxl_checkpoints_dir:
+            candidate = Path(self.config.sdxl_checkpoints_dir) / filename
+            if not candidate.exists():
+                log.warning(
+                    "Preset %r -> %r not found on disk (checked %s); falling back to %r.",
+                    preset, filename, candidate, self.config.sdxl_checkpoint,
+                )
+                return self.config.sdxl_checkpoint
+        log.info("Style preset %r -> SDXL checkpoint %r", preset, filename)
+        return filename
+
     def _build_image_workflow(
         self,
         scene: Scene,
@@ -294,6 +363,7 @@ class ScenePipeline:
         seed: int,
         character_sheet: str = "",
         reference_image: str | None = None,
+        sdxl_checkpoint: str | None = None,
     ) -> dict[str, Any]:
         """Build the SDXL image workflow.
 
@@ -313,7 +383,7 @@ class ScenePipeline:
         sampler_id = _find_node_by_title(wf, "Sample")
         save_id = _find_node_by_title(wf, "Save scene image")
 
-        wf[ckpt_id]["inputs"]["ckpt_name"] = self.config.sdxl_checkpoint
+        wf[ckpt_id]["inputs"]["ckpt_name"] = sdxl_checkpoint or self.config.sdxl_checkpoint
         wf[latent_id]["inputs"]["width"] = self.config.image_width
         wf[latent_id]["inputs"]["height"] = self.config.image_height
 
@@ -349,9 +419,11 @@ class ScenePipeline:
         seed: int,
         character_sheet: str = "",
         reference_image: str | None = None,
+        sdxl_checkpoint: str | None = None,
     ) -> tuple[ComfyOutputFile, Path]:
         wf = self._build_image_workflow(
-            scene, global_style, seed, character_sheet, reference_image
+            scene, global_style, seed, character_sheet, reference_image,
+            sdxl_checkpoint=sdxl_checkpoint,
         )
         save_id = _find_node_by_title(wf, "Save scene image")
         history = self.client.run(wf, timeout=self.config.scene_timeout)
@@ -542,6 +614,12 @@ class ScenePipeline:
         # visual identity of the main subject across the narrative without
         # requiring the user to supply a reference image.
         ip_adapter_reference: str | None = None
+        # Resolve the SDXL checkpoint once per scenario (routing applies
+        # uniformly to all scenes — switching mid-run would break identity
+        # lock because IP-Adapter embeds are tuned to a specific checkpoint).
+        active_checkpoint = self._resolve_sdxl_checkpoint(
+            getattr(scenario, "style_preset", None)
+        )
 
         for scene in scenario.scenes:
             log.info("[scene %d/%d] %s", scene.id, len(scenario.scenes), scene.description)
@@ -554,6 +632,7 @@ class ScenePipeline:
                 img_seed,
                 scenario.character_sheet,
                 reference_image=ip_adapter_reference,
+                sdxl_checkpoint=active_checkpoint,
             )
             input_name = self._upload_image_as_input(image_local)
             if self.config.use_ip_adapter and ip_adapter_reference is None:

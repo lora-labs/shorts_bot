@@ -87,3 +87,33 @@ def test_scenario_roundtrip_json() -> None:
     blob = scenario.model_dump_json()
     restored = Scenario.model_validate(json.loads(blob))
     assert restored == scenario
+
+
+def test_scenario_style_preset_defaults_to_auto() -> None:
+    scenario = Scenario.model_validate(_valid_payload())
+    assert scenario.style_preset == "auto"
+
+
+def test_scenario_accepts_canonical_style_presets() -> None:
+    for preset in ("cinematic_photo", "photoreal", "anime", "illustration"):
+        payload = _valid_payload()
+        payload["style_preset"] = preset
+        scenario = Scenario.model_validate(payload)
+        assert scenario.style_preset == preset
+
+
+def test_scenario_normalises_style_preset_casing_and_spacing() -> None:
+    """Qwen occasionally emits 'Cinematic Photo' or 'anime-style' — be
+    forgiving and map to the canonical id instead of rejecting."""
+    for variant in ("Cinematic_Photo", "CINEMATIC PHOTO", "cinematic-photo"):
+        payload = _valid_payload()
+        payload["style_preset"] = variant
+        scenario = Scenario.model_validate(payload)
+        assert scenario.style_preset == "cinematic_photo"
+
+
+def test_scenario_falls_back_to_auto_on_unknown_preset() -> None:
+    payload = _valid_payload()
+    payload["style_preset"] = "futurama"
+    scenario = Scenario.model_validate(payload)
+    assert scenario.style_preset == "auto"
