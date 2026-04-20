@@ -439,6 +439,21 @@ def test_resolve_sdxl_checkpoint_falls_back_when_preset_missing_from_map(tmp_pat
     assert pipeline._resolve_sdxl_checkpoint("photoreal") == "default.safetensors"
 
 
+def test_resolve_sdxl_checkpoint_override_normalises_casing_and_separators(tmp_path) -> None:
+    """User-facing labels ('Cinematic Photo', 'cinematic-photo') must be
+    accepted so Gradio dropdowns and Telegram commands can push any
+    reasonable variant without silently degrading to the default."""
+    cfg = PipelineConfig(
+        output_dir=tmp_path,
+        sdxl_checkpoint="default.safetensors",
+        checkpoint_presets={"cinematic_photo": "jugg.safetensors"},
+    )
+    pipeline = ScenePipeline(cfg)
+    for sloppy in ("Cinematic Photo", "cinematic-photo", "  CINEMATIC_PHOTO  "):
+        pipeline.config.style_preset_override = sloppy
+        assert pipeline._resolve_sdxl_checkpoint("auto") == "jugg.safetensors", sloppy
+
+
 def test_resolve_sdxl_checkpoint_override_wins_over_scenario(tmp_path) -> None:
     cfg = PipelineConfig(
         output_dir=tmp_path,
