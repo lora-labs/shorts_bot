@@ -499,16 +499,21 @@ class ScenePipeline:
         return idea.strip() + "\n\nUser preferences:\n- " + "\n- ".join(hints)
 
     def _apply_fast_preview(self, scenario: Scenario) -> Scenario:
-        """In fast-preview mode cap scenes to 3 and duration to 2s so a full
-        run completes in a couple of minutes instead of 30.
+        """In fast-preview mode cap scenes to 3, duration to 2s, and halve
+        SDXL steps so a full run completes in a couple of minutes instead
+        of 30.
         """
         if not self.config.fast_preview:
             return scenario
+        self.config.image_steps = max(1, self.config.image_steps // 2)
         trimmed = scenario.scenes[:3]
         for sc in trimmed:
             sc.duration_seconds = min(sc.duration_seconds, 2.0)
         scenario.scenes = trimmed
-        log.info("fast_preview: trimmed to %d scenes, <=2s each", len(trimmed))
+        log.info(
+            "fast_preview: trimmed to %d scenes, <=2s each, image_steps=%d",
+            len(trimmed), self.config.image_steps,
+        )
         return scenario
 
     def run(self, idea: str) -> PipelineResult:
