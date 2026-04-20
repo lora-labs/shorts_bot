@@ -233,6 +233,40 @@ def test_summary_renders_auto_when_hints_missing() -> None:
     assert "auto" in text.lower()
 
 
+@pytest.mark.parametrize(
+    "raw_idea",
+    [
+        "my_cool_idea",
+        "hello *world*",
+        "look: `code`",
+        "[link](http://example.com)",
+        "under_score and *star* together",
+    ],
+)
+def test_summary_escapes_markdown_in_user_idea(raw_idea: str) -> None:
+    """``_summary`` is rendered with ``parse_mode='Markdown'`` so any
+    Markdown-special character in the free-text idea must be escaped,
+    otherwise Telegram rejects the message with BadRequest and the
+    confirm step silently deadlocks."""
+    from telegram.helpers import escape_markdown
+
+    data = {
+        "preset": bot.PRESETS["default"],
+        "idea": raw_idea,
+        "total_duration": 5.0,
+        "scenes_count": 3,
+    }
+    text = bot._summary(data)
+    expected = escape_markdown(raw_idea, version=1)
+    assert expected in text
+    # The italic wrapper the function chooses for the idea field uses a
+    # single ``_`` on each side. Any un-escaped underscore inside the
+    # idea would break that wrapper; assert the escaped form is present
+    # and the raw form is NOT (unless the idea contains no specials).
+    if raw_idea != expected:
+        assert f"_{raw_idea}_" not in text
+
+
 # --------------------------------------------------------------------------- #
 # Conversation handler wiring
 # --------------------------------------------------------------------------- #
@@ -247,3 +281,80 @@ def test_conversation_handler_has_all_wizard_states() -> None:
     assert bot.CHOOSE_DURATION in conv.states
     assert bot.CHOOSE_SCENES in conv.states
     assert bot.CONFIRM in conv.states
+
+
+# --------------------------------------------------------------------------- #
+# Stale-keyboard regression tests
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_handle_scenes_choice_edits_message_to_clear_stale_buttons() -> None:
+    """After the user picks a scene count, the scenes keyboard must be
+    replaced with plain text; otherwise a late tap on the stale buttons
+    fires an orphan callback in the CONFIRM state and flashes a client
+    error. Mirrors the behaviour of ``_handle_duration_choice``."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    query = MagicMock()
+    query.data = "scenes:4"
+    query.answer = AsyncMock()
+    query.edit_message_text = AsyncMock()
+
+    reply_msg = MagicMock()
+    reply_msg.reply_text = AsyncMock()
+    query.message = reply_msg
+
+    update = MagicMock()
+    update.callback_query = query
+    update.effective_message = reply_msg
+    update.message = None
+
+    context = MagicMock()
+    context.user_data = {
+        "preset": bot.PRESETS["default"],
+        "idea": "cat on mars",
+        "total_duration": 10.0,
+    }
+
+    next_state = await bot._handle_scenes_choice(update, context)
+
+    assert context.user_data["scenes_count"] == 4
+    query.edit_message_text.assert_awaited_once()
+    # The next state should be CONFIRM (via _ask_confirm, which sends a
+    # fresh message with the confirm keyboard).
+    assert next_state == bot.CONFIRM
+    reply_msg.reply_text.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_handle_scenes_choice_auto_edits_message() -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    query = MagicMock()
+    query.data = "scenes:auto"
+    query.answer = AsyncMock()
+    query.edit_message_text = AsyncMock()
+    reply_msg = MagicMock()
+    reply_msg.reply_text = AsyncMock()
+    query.message = reply_msg
+
+    update = MagicMock()
+    update.callback_query = query
+    update.effective_message = reply_msg
+    update.message = None
+
+    context = MagicMock()
+    context.user_data = {
+        "preset": bot.PRESETS["default"],
+        "idea": "cat on mars",
+        "total_duration": None,
+    }
+
+    await bot._handle_scenes_choice(update, context)
+
+    assert context.user_data["scenes_count"] is None
+    query.edit_message_text.assert_awaited_once()
+    args, kwargs = query.edit_message_text.call_args
+    rendered = args[0] if args else kwargs.get("text", "")
+    assert "auto" in rendered.lower()

@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.helpers import escape_markdown
 from telegram.ext import (
     ApplicationBuilder,
     CallbackQueryHandler,
@@ -318,15 +319,22 @@ def _inline_idea(text: str) -> str:
 
 
 def _summary(user_data: dict) -> str:
+    """Render the pre-run summary. The idea is free-form user text so it
+    must be escaped against Markdown-v1 before being interpolated into a
+    formatted string — otherwise an idea like ``my_cool_idea`` or
+    ``hello *world*`` makes Telegram reject the message with BadRequest
+    and the wizard silently deadlocks at the confirm step.
+    """
     preset: Preset = user_data["preset"]
     idea: str = user_data["idea"]
     total: float | None = user_data.get("total_duration")
     scenes: int | None = user_data.get("scenes_count")
     dur_s = f"{total:g} s" if total else "auto"
     scenes_s = str(scenes) if scenes else "auto"
+    safe_idea = escape_markdown(idea, version=1)
     return (
         f"Пресет: *{preset.label}*\n"
-        f"Идея: _{idea}_\n"
+        f"Идея: _{safe_idea}_\n"
         f"Длина: *{dur_s}*\n"
         f"Сцен: *{scenes_s}*"
     )
@@ -441,6 +449,14 @@ async def _handle_scenes_choice(
     await query.answer()
     _, token = (query.data or "").split(":", 1)
     context.user_data["scenes_count"] = None if token == "auto" else int(token)
+    # Mirror _handle_duration_choice: replace the message that held the
+    # scenes keyboard with a plain-text record of the pick. Without this
+    # the keyboard stays on screen and a late tap fires a callback that
+    # has no handler in the CONFIRM state, flashing an error in-client.
+    await query.edit_message_text(
+        f"Сцен: *{token}*" if token != "auto" else "Сцен: *auto*",
+        parse_mode="Markdown",
+    )
     return await _ask_confirm(update, context)
 
 
@@ -465,7 +481,13 @@ async def _handle_confirm(
     if choice != "yes":
         await query.edit_message_text("Отменено.")
         return ConversationHandler.END
-    await query.edit_message_text(_summary(context.user_data) + "\n\nГенерирую…")
+    # _summary() returns Markdown-formatted text; keep parse_mode
+    # consistent with _ask_confirm so the asterisks/underscores render
+    # instead of leaking as literal characters to the user.
+    await query.edit_message_text(
+        _summary(context.user_data) + "\n\nГенерирую…",
+        parse_mode="Markdown",
+    )
     await _run_and_reply(update, context)
     return ConversationHandler.END
 
