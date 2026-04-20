@@ -113,17 +113,35 @@ class PipelineConfig:
     use_ip_adapter: bool = True
     ip_adapter_model: str = "ip-adapter-plus_sdxl_vit-h.safetensors"
     clip_vision_model: str = "CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors"
-    # 0.7 is a good balance: strong enough that the character stays
-    # recognisable, soft enough that the scene-specific pose / setting
-    # still reads clearly. Tune if you want more rigid (↑) or more
-    # flexible (↓) consistency.
-    ip_adapter_weight: float = 0.7
-    # "linear" applies the embeds evenly across denoising steps.
-    # "style transfer" biases towards look over composition.
-    # "prompt is more important" lets the text prompt win ties.
-    ip_adapter_weight_type: str = "linear"
+    # 0.55 balances identity vs scene diversity. The previous default
+    # (0.7 + "linear") copied the reference's composition and lighting
+    # too strongly, so scenes 2+ looked almost identical to scene 1.
+    # Tune up (↑0.75) for tighter identity, down (↓0.4) for more
+    # compositional freedom per scene.
+    ip_adapter_weight: float = 0.55
+    # "strong style transfer" transfers identity + style but leaves the
+    # scene-specific composition (framing, pose, background) mostly to
+    # the text prompt — exactly what we want for multi-scene narratives.
+    # "linear" is the opposite: it copies composition too strongly and
+    # produces near-duplicate shots.
+    ip_adapter_weight_type: str = "strong style transfer"
     ip_adapter_start_at: float = 0.0
     ip_adapter_end_at: float = 1.0
+
+    # User-facing overrides applied at orchestration time.
+    #
+    # ``negative_prompt_override`` is appended (comma-joined) to every
+    # scene's negative prompt. Useful to globally ban e.g. "text,
+    # watermark, hands" without editing the system prompt.
+    negative_prompt_override: str = ""
+    # ``fast_preview`` halves SDXL steps, caps scene count to 3, and
+    # clamps per-scene duration to 2s. Meant for rapid iteration before
+    # committing to a full-length render.
+    fast_preview: bool = False
+    # Hints injected into the user idea before sending to Qwen. None
+    # means "let Qwen decide" (legacy behaviour).
+    scenes_count_hint: int | None = None
+    scene_duration_hint: float | None = None
 
     # Scenario workflow can take 15+ min when Qwen runs on CPU (default on
     # low-VRAM setups). 30 min default gives headroom for that + reasoning.
@@ -195,6 +213,8 @@ class ScenePipeline:
         self.client = ComfyClient(self.config.comfyui_url)
         self.config.output_dir = Path(self.config.output_dir)
         self.config.output_dir.mkdir(parents=True, exist_ok=True)
+        # Snapshot to keep fast_preview idempotent across repeated run() calls.
+        self._original_image_steps = self.config.image_steps
 
     # ---------- Stage 1: scenario ----------
 
@@ -263,6 +283,19 @@ class ScenePipeline:
         parts.append(scene.image_prompt.strip())
         if global_style and global_style.strip():
             parts.append(global_style.strip())
+        return ", ".join(parts)
+
+    def _compose_negative_prompt(self, scene: Scene) -> str:
+        """Merge the scene's scenario-generated negatives with the user's
+        global override (``PipelineConfig.negative_prompt_override``).
+        Both are joined with ``, ``; empty sides are skipped.
+        """
+        parts: list[str] = []
+        if scene.negative_prompt and scene.negative_prompt.strip():
+            parts.append(scene.negative_prompt.strip())
+        override = (self.config.negative_prompt_override or "").strip()
+        if override:
+            parts.append(override)
         return ", ".join(parts)
 
     def _compose_video_prompt(
@@ -370,7 +403,7 @@ class ScenePipeline:
         wf[pos_id]["inputs"]["text"] = self._compose_image_prompt(
             scene, global_style, character_sheet
         )
-        wf[neg_id]["inputs"]["text"] = scene.negative_prompt
+        wf[neg_id]["inputs"]["text"] = self._compose_negative_prompt(scene)
 
         wf[sampler_id]["inputs"]["noise_seed"] = seed
         wf[sampler_id]["inputs"]["steps"] = self.config.image_steps
@@ -472,7 +505,7 @@ class ScenePipeline:
         wf[pos_id]["inputs"]["text"] = self._compose_video_prompt(
             scene, global_style, character_sheet
         )
-        wf[neg_id]["inputs"]["text"] = scene.negative_prompt
+        wf[neg_id]["inputs"]["text"] = self._compose_negative_prompt(scene)
 
         length = self._frames_for_duration(scene.duration_seconds)
         wf[cond_id]["inputs"]["frame_rate"] = self.config.video_fps
@@ -523,9 +556,50 @@ class ScenePipeline:
     def _seed(self) -> int:
         return self.config.seed if self.config.seed is not None else random.randint(1, 2**31 - 1)
 
+    def _apply_idea_hints(self, idea: str) -> str:
+        """Append user-facing hints (scene count, duration) as plain-English
+        guidance to the idea before sending it to Qwen.
+
+        We prefer prompt-level hints over mutating the system prompt so the
+        default behaviour (Qwen picks what fits the story) is preserved when
+        the user does not opt in from the UI.
+        """
+        hints: list[str] = []
+        n = self.config.scenes_count_hint
+        if n is not None and n > 0:
+            hints.append(f"Generate exactly {n} scenes.")
+        d = self.config.scene_duration_hint
+        if d is not None and d > 0:
+            hints.append(f"Each scene should be about {d:g} seconds long.")
+        if not hints:
+            return idea
+        return idea.strip() + "\n\nUser preferences:\n- " + "\n- ".join(hints)
+
+    def _apply_fast_preview(self, scenario: Scenario) -> Scenario:
+        """In fast-preview mode cap scenes to 3, duration to 2s, and halve
+        SDXL steps so a full run completes in a couple of minutes instead
+        of 30.
+        """
+        if not self.config.fast_preview:
+            return scenario
+        # Halve against the ORIGINAL step count (captured in __init__) so
+        # calling run() repeatedly on the same ScenePipeline with
+        # fast_preview=True doesn't compound (28 -> 14 -> 7 -> 3 -> 1).
+        self.config.image_steps = max(1, self._original_image_steps // 2)
+        trimmed = scenario.scenes[:3]
+        for sc in trimmed:
+            sc.duration_seconds = min(sc.duration_seconds, 2.0)
+        scenario.scenes = trimmed
+        log.info(
+            "fast_preview: trimmed to %d scenes, <=2s each, image_steps=%d",
+            len(trimmed), self.config.image_steps,
+        )
+        return scenario
+
     def run(self, idea: str) -> PipelineResult:
         log.info("=== ScenePipeline start: %r ===", idea)
-        scenario = self.generate_scenario(idea)
+        scenario = self.generate_scenario(self._apply_idea_hints(idea))
+        scenario = self._apply_fast_preview(scenario)
         log.info("Scenario: %s (%d scenes)", scenario.title, len(scenario.scenes))
 
         (self.config.output_dir / "scenario.json").write_text(
