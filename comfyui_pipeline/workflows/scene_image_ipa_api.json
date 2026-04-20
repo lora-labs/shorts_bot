@@ -57,11 +57,11 @@
       "ipadapter": ["8", 0],
       "image": ["11", 0],
       "clip_vision": ["9", 0],
-      "weight": 0.55,
-      "weight_type": "strong style transfer",
+      "weight": 0.65,
+      "weight_type": "standard",
       "combine_embeds": "concat",
       "start_at": 0.0,
-      "end_at": 1.0,
+      "end_at": 0.8,
       "embeds_scaling": "V only"
     },
     "_meta": { "title": "Apply IP-Adapter" }

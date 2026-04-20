@@ -136,20 +136,25 @@ class PipelineConfig:
     use_ip_adapter: bool = True
     ip_adapter_model: str = "ip-adapter-plus_sdxl_vit-h.safetensors"
     clip_vision_model: str = "CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors"
-    # 0.55 balances identity vs scene diversity. The previous default
-    # (0.7 + "linear") copied the reference's composition and lighting
-    # too strongly, so scenes 2+ looked almost identical to scene 1.
-    # Tune up (↑0.75) for tighter identity, down (↓0.4) for more
-    # compositional freedom per scene.
-    ip_adapter_weight: float = 0.55
-    # "strong style transfer" transfers identity + style but leaves the
-    # scene-specific composition (framing, pose, background) mostly to
-    # the text prompt — exactly what we want for multi-scene narratives.
-    # "linear" is the opposite: it copies composition too strongly and
-    # produces near-duplicate shots.
-    ip_adapter_weight_type: str = "strong style transfer"
+    # 0.65 + "standard" + end_at 0.8 is the sweet spot for keeping the
+    # same face/subject across scenes without copying the reference's
+    # framing. History of this tuning:
+    #   - 0.7 + "linear" (initial): scenes were near-duplicates of scene 1
+    #   - 0.55 + "strong style transfer" (PR #15): style locked but
+    #     identity drifted — faces of the protagonist changed every scene
+    #   - 0.65 + "standard" + end_at 0.8 (now): "standard" weight_type
+    #     preserves identity like the original "linear" but without the
+    #     composition copy; stopping IPA at 80% of sampling lets fine
+    #     detail (exact expression, pose, background) diverge per scene.
+    # Tune up (↑0.8) for tighter identity (risk: scenes look similar),
+    # down (↓0.5) for more per-scene freedom (risk: face drifts).
+    ip_adapter_weight: float = 0.65
+    ip_adapter_weight_type: str = "standard"
     ip_adapter_start_at: float = 0.0
-    ip_adapter_end_at: float = 1.0
+    # Stop IPA at 80% so the last 20% of denoising is prompt-only —
+    # avoids the "every scene has the same micro-expression" artifact
+    # without losing identity (which is locked in the earlier steps).
+    ip_adapter_end_at: float = 0.8
 
     # User-facing overrides applied at orchestration time.
     #

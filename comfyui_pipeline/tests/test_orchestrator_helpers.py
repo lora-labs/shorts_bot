@@ -626,6 +626,31 @@ def test_build_image_workflow_chains_loras_through_ip_adapter(tmp_path) -> None:
     assert wf[pos_id]["inputs"]["clip"] == [lora_id, 1]
 
 
+def test_ipa_defaults_keep_identity_without_copying_composition(tmp_path) -> None:
+    """Regression for PR #20: 'strong style transfer' @ 0.55 from PR #15
+    lost face identity between scenes. The new defaults ('standard' @
+    0.65, end_at 0.8) restore identity lock while still letting later
+    denoising steps diverge per-scene (end_at < 1.0)."""
+    cfg = PipelineConfig(output_dir=tmp_path)
+    assert cfg.ip_adapter_weight_type == "standard"
+    assert cfg.ip_adapter_weight == 0.65
+    assert cfg.ip_adapter_start_at == 0.0
+    assert cfg.ip_adapter_end_at == 0.8
+
+    pipeline = ScenePipeline(cfg)
+    scene = Scene(
+        id=2, description="x", image_prompt="a cat",
+        video_prompt="x", duration_seconds=3.0,
+    )
+    wf = pipeline._build_image_workflow(
+        scene, "cinematic", seed=1, reference_image="scene_01.png"
+    )
+    ipa = wf[orch._find_node_by_title(wf, "Apply IP-Adapter")]["inputs"]
+    assert ipa["weight_type"] == "standard"
+    assert ipa["weight"] == 0.65
+    assert ipa["end_at"] == 0.8
+
+
 def test_build_image_workflow_without_loras_leaves_graph_untouched(tmp_path) -> None:
     cfg = PipelineConfig(output_dir=tmp_path, sdxl_checkpoint="default.safetensors")
     pipeline = ScenePipeline(cfg)
