@@ -47,10 +47,10 @@ class PipelineConfig:
     comfyui_url: str = "http://127.0.0.1:8188"
     output_dir: Path = Path("output/scenes")
     sdxl_checkpoint: str = "sd_xl_base_1.0.safetensors"
-    ltx_checkpoint: str = "ltx-2.3-22b-distilled-1.1.safetensors"
-    ltx_lora: str = "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
+    ltx_checkpoint: str = "ltx-2.3-22b-distilled-fp8.safetensors"
+    ltx_lora: str = "ltx-2.3-22b-distilled-lora-384.safetensors"
     ltx_lora_strength: float = 1.0
-    ltx_text_encoder: str = "comfy_gemma_3_12B_it.safetensors"
+    ltx_text_encoder: str = "gemma_3_12B_it_fp4_mixed.safetensors"
     qwen_model: str = "Qwen/Qwen3-8B"
     # Where the Qwen LLM runs. On low-VRAM cards (e.g. RTX 4070 12 GB) the
     # 8B model in fp16 does not fit alongside SDXL/LTX; use "cpu" to generate
@@ -268,11 +268,17 @@ class ScenePipeline:
         pos_id = _find_node_by_title(wf, "Video positive prompt")
         neg_id = _find_node_by_title(wf, "Video negative prompt")
         cond_id = _find_node_by_title(wf, "LTX conditioning")
-        # Builtin LTXVImgToVideo now subsumes both the old
-        # LTXVImgToVideoConditionOnly node and EmptyLTXVLatentVideo — it takes
-        # positive/negative/vae/image and emits positive/negative/latent in
-        # one shot, sized by width/height/length inputs on the same node.
-        i2v_id = _find_node_by_title(wf, "LTX img-to-video")
+        # LTX 2.3 is an audio-visual model. The sampler expects a unified
+        # AV-latent (video latent + audio latent concatenated). The workflow
+        # therefore fans out into two parallel branches:
+        #   • video: EmptyLTXVLatentVideo → LTXVImgToVideoConditionOnly
+        #   • audio: LTXVAudioVAELoader → LTXVEmptyLatentAudio
+        # Both branches merge in LTXVConcatAVLatent before sampling. After
+        # sampling, LTXVSeparateAVLatent splits them again; we decode only
+        # the video latent and discard the (silent) audio latent.
+        video_latent_id = _find_node_by_title(wf, "Empty video latent")
+        audio_vae_id = _find_node_by_title(wf, "Load audio VAE")
+        audio_latent_id = _find_node_by_title(wf, "Empty audio latent")
         sched_id = _find_node_by_title(wf, "LTX scheduler")
         noise_id = _find_node_by_title(wf, "Random noise")
         guider_id = _find_node_by_title(wf, "CFG guider")
@@ -280,11 +286,14 @@ class ScenePipeline:
         save_id = _find_node_by_title(wf, "Save scene video")
 
         wf[ckpt_id]["inputs"]["ckpt_name"] = self.config.ltx_checkpoint
-        # Current ComfyUI (0.18.5) dropped the LTX-specific LTXAVTextEncoderLoader
-        # in favour of the generic core CLIPLoader with type="ltxv", which reads
-        # the Gemma safetensors directly. The LTX checkpoint is NOT re-passed
-        # here any more — CLIPLoader only needs the encoder file + type tag.
-        wf[enc_id]["inputs"]["clip_name"] = self.config.ltx_text_encoder
+        # LTXAVTextEncoderLoader needs BOTH the Gemma encoder file and the
+        # LTX checkpoint (to read the cross-attention projection weights that
+        # pair Gemma embeddings with the video model).
+        wf[enc_id]["inputs"]["text_encoder"] = self.config.ltx_text_encoder
+        wf[enc_id]["inputs"]["ckpt_name"] = self.config.ltx_checkpoint
+        # The audio VAE loader re-reads the same LTX checkpoint — the audio
+        # VAE weights live in the same .safetensors alongside the video model.
+        wf[audio_vae_id]["inputs"]["ckpt_name"] = self.config.ltx_checkpoint
         wf[lora_id]["inputs"]["lora_name"] = self.config.ltx_lora
         wf[lora_id]["inputs"]["strength_model"] = self.config.ltx_lora_strength
         wf[image_id]["inputs"]["image"] = input_image_name
@@ -295,10 +304,13 @@ class ScenePipeline:
         wf[pos_id]["inputs"]["text"] = full_prompt
         wf[neg_id]["inputs"]["text"] = scene.negative_prompt
 
+        length = self._frames_for_duration(scene.duration_seconds)
         wf[cond_id]["inputs"]["frame_rate"] = self.config.video_fps
-        wf[i2v_id]["inputs"]["width"] = self.config.video_width
-        wf[i2v_id]["inputs"]["height"] = self.config.video_height
-        wf[i2v_id]["inputs"]["length"] = self._frames_for_duration(scene.duration_seconds)
+        wf[video_latent_id]["inputs"]["width"] = self.config.video_width
+        wf[video_latent_id]["inputs"]["height"] = self.config.video_height
+        wf[video_latent_id]["inputs"]["length"] = length
+        wf[audio_latent_id]["inputs"]["frames_number"] = length
+        wf[audio_latent_id]["inputs"]["frame_rate"] = int(round(self.config.video_fps))
         wf[sched_id]["inputs"]["steps"] = self.config.video_steps
         wf[noise_id]["inputs"]["noise_seed"] = seed
         wf[guider_id]["inputs"]["cfg"] = self.config.video_cfg
