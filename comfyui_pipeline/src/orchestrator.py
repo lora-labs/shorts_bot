@@ -198,7 +198,43 @@ class ScenePipeline:
 
     # ---------- Stage 2: scene image ----------
 
-    def _build_image_workflow(self, scene: Scene, global_style: str, seed: int) -> dict[str, Any]:
+    def _compose_image_prompt(
+        self, scene: Scene, global_style: str, character_sheet: str
+    ) -> str:
+        """Prepend the canonical character description and global style to
+        the scene's image prompt. Keeping appearance details in ONE place
+        (character_sheet) and reusing them verbatim across all scenes is
+        what gives us the same cat / person / robot in every frame.
+        """
+        parts: list[str] = []
+        if character_sheet and character_sheet.strip():
+            parts.append(character_sheet.strip())
+        parts.append(scene.image_prompt.strip())
+        if global_style and global_style.strip():
+            parts.append(global_style.strip())
+        return ", ".join(parts)
+
+    def _compose_video_prompt(
+        self, scene: Scene, global_style: str, character_sheet: str
+    ) -> str:
+        """LTX also benefits from seeing the character description so it
+        does not drift away from the keyframe's subject during motion.
+        """
+        parts: list[str] = []
+        if character_sheet and character_sheet.strip():
+            parts.append(character_sheet.strip())
+        parts.append(scene.video_prompt.strip())
+        if global_style and global_style.strip():
+            parts.append(global_style.strip())
+        return ", ".join(parts)
+
+    def _build_image_workflow(
+        self,
+        scene: Scene,
+        global_style: str,
+        seed: int,
+        character_sheet: str = "",
+    ) -> dict[str, Any]:
         wf = copy.deepcopy(_load_workflow("scene_image_api.json"))
         ckpt_id = _find_node_by_title(wf, "Load SDXL checkpoint")
         latent_id = _find_node_by_title(wf, "Empty latent 16:9")
@@ -211,10 +247,9 @@ class ScenePipeline:
         wf[latent_id]["inputs"]["width"] = self.config.image_width
         wf[latent_id]["inputs"]["height"] = self.config.image_height
 
-        full_prompt = scene.image_prompt
-        if global_style and global_style.strip():
-            full_prompt = f"{scene.image_prompt}, {global_style}"
-        wf[pos_id]["inputs"]["text"] = full_prompt
+        wf[pos_id]["inputs"]["text"] = self._compose_image_prompt(
+            scene, global_style, character_sheet
+        )
         wf[neg_id]["inputs"]["text"] = scene.negative_prompt
 
         wf[sampler_id]["inputs"]["noise_seed"] = seed
@@ -224,8 +259,14 @@ class ScenePipeline:
         wf[save_id]["inputs"]["filename_prefix"] = f"scene_{scene.id:02d}_image"
         return wf
 
-    def _render_scene_image(self, scene: Scene, global_style: str, seed: int) -> tuple[ComfyOutputFile, Path]:
-        wf = self._build_image_workflow(scene, global_style, seed)
+    def _render_scene_image(
+        self,
+        scene: Scene,
+        global_style: str,
+        seed: int,
+        character_sheet: str = "",
+    ) -> tuple[ComfyOutputFile, Path]:
+        wf = self._build_image_workflow(scene, global_style, seed, character_sheet)
         save_id = _find_node_by_title(wf, "Save scene image")
         history = self.client.run(wf, timeout=self.config.scene_timeout)
 
@@ -258,7 +299,12 @@ class ScenePipeline:
         return f"{subfolder}/{name}" if subfolder else name
 
     def _build_video_workflow(
-        self, scene: Scene, input_image_name: str, global_style: str, seed: int
+        self,
+        scene: Scene,
+        input_image_name: str,
+        global_style: str,
+        seed: int,
+        character_sheet: str = "",
     ) -> dict[str, Any]:
         wf = copy.deepcopy(_load_workflow("scene_video_api.json"))
         ckpt_id = _find_node_by_title(wf, "Load LTX checkpoint")
@@ -298,10 +344,9 @@ class ScenePipeline:
         wf[lora_id]["inputs"]["strength_model"] = self.config.ltx_lora_strength
         wf[image_id]["inputs"]["image"] = input_image_name
 
-        full_prompt = scene.video_prompt
-        if global_style and global_style.strip():
-            full_prompt = f"{scene.video_prompt}, {global_style}"
-        wf[pos_id]["inputs"]["text"] = full_prompt
+        wf[pos_id]["inputs"]["text"] = self._compose_video_prompt(
+            scene, global_style, character_sheet
+        )
         wf[neg_id]["inputs"]["text"] = scene.negative_prompt
 
         length = self._frames_for_duration(scene.duration_seconds)
@@ -327,9 +372,16 @@ class ScenePipeline:
         return target
 
     def _render_scene_video(
-        self, scene: Scene, input_image_name: str, global_style: str, seed: int
+        self,
+        scene: Scene,
+        input_image_name: str,
+        global_style: str,
+        seed: int,
+        character_sheet: str = "",
     ) -> Path:
-        wf = self._build_video_workflow(scene, input_image_name, global_style, seed)
+        wf = self._build_video_workflow(
+            scene, input_image_name, global_style, seed, character_sheet
+        )
         save_id = _find_node_by_title(wf, "Save scene video")
         history = self.client.run(wf, timeout=self.config.scene_timeout)
         outputs = self.client.collect_outputs(history)
@@ -363,9 +415,13 @@ class ScenePipeline:
             img_seed = base_seed + 10 * scene.id
             vid_seed = base_seed + 10 * scene.id + 1
 
-            _, image_local = self._render_scene_image(scene, scenario.style, img_seed)
+            _, image_local = self._render_scene_image(
+                scene, scenario.style, img_seed, scenario.character_sheet
+            )
             input_name = self._upload_image_as_input(image_local)
-            video_local = self._render_scene_video(scene, input_name, scenario.style, vid_seed)
+            video_local = self._render_scene_video(
+                scene, input_name, scenario.style, vid_seed, scenario.character_sheet
+            )
             result.scene_artifacts.append(
                 SceneArtifacts(scene=scene, image_path=image_local, video_path=video_local)
             )

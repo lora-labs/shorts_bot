@@ -39,6 +39,21 @@ def test_scenario_parses_valid_payload() -> None:
     assert scenario.scenes[0].negative_prompt  # has a default
 
 
+def test_scenario_accepts_character_sheet() -> None:
+    payload = _valid_payload()
+    payload["character_sheet"] = (
+        "small white service robot, round head, single blue glowing eye, "
+        "matte plastic shell, red ribbon around left wrist"
+    )
+    scenario = Scenario.model_validate(payload)
+    assert "blue glowing eye" in scenario.character_sheet
+
+
+def test_scenario_character_sheet_defaults_to_empty() -> None:
+    scenario = Scenario.model_validate(_valid_payload())
+    assert scenario.character_sheet == ""
+
+
 def test_scenario_reindexes_scene_ids() -> None:
     payload = _valid_payload()
     payload["scenes"][0]["id"] = 5

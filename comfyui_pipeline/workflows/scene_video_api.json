@@ -47,7 +47,7 @@
     "class_type": "LTXVPreprocess",
     "inputs": {
       "image": ["4", 0],
-      "img_compression": 18
+      "img_compression": 4
     },
     "_meta": { "title": "Preprocess keyframe" }
   },
@@ -161,7 +161,7 @@
       "latents": ["19", 0],
       "horizontal_tiles": 2,
       "vertical_tiles": 2,
-      "overlap": 1,
+      "overlap": 2,
       "last_frame_fix": false
     },
     "_meta": { "title": "Decode video latent" }
