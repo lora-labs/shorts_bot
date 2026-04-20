@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import gc
 import logging
+import os
 import threading
 from typing import Any
 
@@ -16,6 +17,18 @@ log = logging.getLogger(__name__)
 
 _MODEL_CACHE: dict[str, Any] = {}
 _CACHE_LOCK = threading.Lock()
+
+
+def _looks_like_local_path(model_name_or_path: str) -> bool:
+    """True if ``model_name_or_path`` points at an on-disk directory.
+
+    We use this to force ``local_files_only=True`` so transformers never
+    tries to contact huggingface.co for metadata/chat-templates/shards when
+    the user has already downloaded the model. Without this, passing a
+    local path still triggers HEAD + xet-token calls and (on cache miss)
+    can re-download 16 GB of shards — exactly the failure mode reported.
+    """
+    return os.path.isdir(model_name_or_path)
 
 
 def _load_model(model_name_or_path: str, device: str, dtype: str):
@@ -27,6 +40,8 @@ def _load_model(model_name_or_path: str, device: str, dtype: str):
     cached = _MODEL_CACHE.get(key)
     if cached is not None:
         return cached
+
+    local_only = _looks_like_local_path(model_name_or_path)
 
     torch_dtype: Any
     if dtype == "auto":
@@ -57,15 +72,20 @@ def _load_model(model_name_or_path: str, device: str, dtype: str):
         raise ValueError(f"Unsupported device: {device}")
 
     log.info(
-        "Loading Qwen model %s on %s (device_map=%s, dtype=%s)",
-        model_name_or_path, resolved_device, device_map, dtype,
+        "Loading Qwen model %s on %s (device_map=%s, dtype=%s, local_only=%s)",
+        model_name_or_path, resolved_device, device_map, dtype, local_only,
     )
-    tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name_or_path,
+        trust_remote_code=True,
+        local_files_only=local_only,
+    )
     model = AutoModelForCausalLM.from_pretrained(
         model_name_or_path,
         torch_dtype=torch_dtype,
         device_map=device_map,
         trust_remote_code=True,
+        local_files_only=local_only,
     )
     model.eval()
     _MODEL_CACHE[key] = (tokenizer, model, resolved_device)
