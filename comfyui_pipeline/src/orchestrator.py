@@ -280,8 +280,11 @@ class ScenePipeline:
         save_id = _find_node_by_title(wf, "Save scene video")
 
         wf[ckpt_id]["inputs"]["ckpt_name"] = self.config.ltx_checkpoint
-        wf[enc_id]["inputs"]["text_encoder"] = self.config.ltx_text_encoder
-        wf[enc_id]["inputs"]["ckpt_name"] = self.config.ltx_checkpoint
+        # Current ComfyUI (0.18.5) dropped the LTX-specific LTXAVTextEncoderLoader
+        # in favour of the generic core CLIPLoader with type="ltxv", which reads
+        # the Gemma safetensors directly. The LTX checkpoint is NOT re-passed
+        # here any more — CLIPLoader only needs the encoder file + type tag.
+        wf[enc_id]["inputs"]["clip_name"] = self.config.ltx_text_encoder
         wf[lora_id]["inputs"]["lora_name"] = self.config.ltx_lora
         wf[lora_id]["inputs"]["strength_model"] = self.config.ltx_lora_strength
         wf[image_id]["inputs"]["image"] = input_image_name

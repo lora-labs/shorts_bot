@@ -66,10 +66,11 @@ def test_scene_video_workflow_is_ltx_2_3() -> None:
     # LTXVImgToVideo node subsumes both the old EmptyLTXVLatentVideo and
     # LTXVImgToVideoConditionOnly nodes (it accepts positive/negative/vae/
     # image and width/height/length and emits positive/negative/latent in
-    # one shot). The old names were removed from both ComfyUI core and the
-    # Lightricks ComfyUI-LTXVideo extension, so we must not reference them.
+    # one shot). The LTX-specific text encoder loader LTXAVTextEncoderLoader
+    # was also dropped; current workflows load the Gemma encoder through the
+    # generic core CLIPLoader with type="ltxv".
     for expected in (
-        "LTXAVTextEncoderLoader",
+        "CLIPLoader",
         "LTXVConditioning",
         "LTXVImgToVideo",
         "LTXVScheduler",
@@ -85,3 +86,17 @@ def test_scene_video_workflow_is_ltx_2_3() -> None:
     assert "SamplerCustom" not in class_types
     assert "EmptyLTXVLatentVideo" not in class_types
     assert "LTXVImgToVideoConditionOnly" not in class_types
+    assert "LTXAVTextEncoderLoader" not in class_types
+
+
+def test_scene_video_cliploader_uses_ltxv_type() -> None:
+    """The LTX text encoder node must load the Gemma safetensors via
+    CLIPLoader with type="ltxv" — this is what current ComfyUI uses to
+    wire Gemma-3 tokenization + embedding space to LTXVConditioning.
+    Using the wrong type silently produces nonsense embeddings."""
+    data = json.loads((WORKFLOW_DIR / "scene_video_api.json").read_text(encoding="utf-8"))
+    enc_nodes = [n for n in data.values() if n["class_type"] == "CLIPLoader"]
+    assert len(enc_nodes) == 1, "scene_video must have exactly one CLIPLoader (Gemma)"
+    enc = enc_nodes[0]
+    assert enc["inputs"].get("type") == "ltxv"
+    assert enc["inputs"].get("clip_name"), "CLIPLoader must name a clip/text-encoder file"
