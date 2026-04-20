@@ -101,6 +101,124 @@ def test_video_prompt_prepends_character_sheet(tmp_path) -> None:
     assert vid_pos.index(sheet) < vid_pos.index("skateboard rolls")
 
 
+def test_default_config_is_vertical_9_16(tmp_path) -> None:
+    """Output targets TikTok / Reels / Shorts — vertical 9:16 by default."""
+    cfg = PipelineConfig(output_dir=tmp_path)
+    assert cfg.image_height > cfg.image_width
+    assert cfg.video_height > cfg.video_width
+    # Both SDXL and LTX need dims that respect their bucket/stride rules.
+    assert cfg.image_width % 64 == 0 and cfg.image_height % 64 == 0
+    assert cfg.video_width % 32 == 0 and cfg.video_height % 32 == 0
+
+
+def test_image_workflow_wires_9_16_latent_dims(tmp_path) -> None:
+    cfg = PipelineConfig(output_dir=tmp_path, image_width=768, image_height=1344)
+    pipeline = ScenePipeline(cfg)
+    scene = Scene(
+        id=1,
+        description="x",
+        image_prompt="a lighthouse",
+        video_prompt="x",
+        duration_seconds=3.0,
+    )
+    wf = pipeline._build_image_workflow(scene, "cinematic", seed=1)
+    latent = wf[orch._find_node_by_title(wf, "Empty latent 9:16")]["inputs"]
+    assert latent["width"] == 768
+    assert latent["height"] == 1344
+
+
+def test_scene1_uses_plain_workflow_no_ip_adapter(tmp_path) -> None:
+    """Scene 1 has no reference image yet — must fall back to the plain
+    SDXL workflow without IPAdapter nodes."""
+    cfg = PipelineConfig(output_dir=tmp_path)
+    pipeline = ScenePipeline(cfg)
+    scene = Scene(
+        id=1,
+        description="opens door",
+        image_prompt="in a cozy kitchen",
+        video_prompt="x",
+        duration_seconds=3.0,
+    )
+    wf = pipeline._build_image_workflow(scene, "cinematic", seed=1)
+    class_types = {n["class_type"] for n in wf.values()}
+    assert "IPAdapterAdvanced" not in class_types
+
+
+def test_scene2plus_uses_ipa_workflow_when_reference_provided(tmp_path) -> None:
+    """When a reference_image name is passed, orchestrator must switch to
+    the IPA workflow and wire the reference through LoadImage →
+    PrepImageForClipVision → IPAdapterAdvanced → KSamplerAdvanced.model."""
+    cfg = PipelineConfig(
+        output_dir=tmp_path,
+        ip_adapter_model="ip-adapter-plus_sdxl_vit-h.safetensors",
+        clip_vision_model="CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors",
+        ip_adapter_weight=0.55,
+        ip_adapter_weight_type="style transfer",
+    )
+    pipeline = ScenePipeline(cfg)
+    scene = Scene(
+        id=2,
+        description="sits by window",
+        image_prompt="on a windowsill at night",
+        video_prompt="x",
+        duration_seconds=3.0,
+    )
+    wf = pipeline._build_image_workflow(
+        scene,
+        "cinematic",
+        seed=1,
+        character_sheet="fluffy white cat",
+        reference_image="scene_01_abc.png",
+    )
+    class_types = {n["class_type"] for n in wf.values()}
+    assert "IPAdapterAdvanced" in class_types
+    assert "IPAdapterModelLoader" in class_types
+    assert "CLIPVisionLoader" in class_types
+    assert "PrepImageForClipVision" in class_types
+
+    ipa_id = orch._find_node_by_title(wf, "Apply IP-Adapter")
+    ipa = wf[ipa_id]
+    assert ipa["inputs"]["weight"] == 0.55
+    assert ipa["inputs"]["weight_type"] == "style transfer"
+    # model input of KSamplerAdvanced must be the IPAdapter output (id 12),
+    # not the raw checkpoint (id 1).
+    sampler = wf[orch._find_node_by_title(wf, "Sample")]
+    assert sampler["inputs"]["model"] == [ipa_id, 0]
+
+    assert wf[orch._find_node_by_title(wf, "Load IP-Adapter")]["inputs"]["ipadapter_file"] == (
+        "ip-adapter-plus_sdxl_vit-h.safetensors"
+    )
+    assert wf[orch._find_node_by_title(wf, "Load CLIP Vision")]["inputs"]["clip_name"] == (
+        "CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors"
+    )
+    assert wf[orch._find_node_by_title(wf, "Load reference image")]["inputs"]["image"] == (
+        "scene_01_abc.png"
+    )
+    # Character sheet must still prepend even in the IPA variant.
+    pos = wf[orch._find_node_by_title(wf, "Positive prompt")]["inputs"]["text"]
+    assert pos.index("fluffy white cat") < pos.index("on a windowsill")
+
+
+def test_ipa_disabled_by_config_falls_back_to_plain_workflow(tmp_path) -> None:
+    """If the user sets use_ip_adapter=False, the orchestrator must NEVER
+    pick the IPA workflow even when a reference_image is supplied —
+    useful when the IPAdapter model isn't installed on this box."""
+    cfg = PipelineConfig(output_dir=tmp_path, use_ip_adapter=False)
+    pipeline = ScenePipeline(cfg)
+    scene = Scene(
+        id=3,
+        description="walks",
+        image_prompt="in a park",
+        video_prompt="x",
+        duration_seconds=3.0,
+    )
+    wf = pipeline._build_image_workflow(
+        scene, "cinematic", seed=1, reference_image="scene_01.png"
+    )
+    class_types = {n["class_type"] for n in wf.values()}
+    assert "IPAdapterAdvanced" not in class_types
+
+
 def test_prompt_composition_handles_empty_character_sheet(tmp_path) -> None:
     """Backwards compat: scenarios without a character_sheet (e.g. from an
     older Qwen prompt template) must still produce a valid prompt."""

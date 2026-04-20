@@ -62,10 +62,15 @@ class PipelineConfig:
     # the following SDXL + LTX stages.
     qwen_keep_loaded: bool = False
 
-    image_width: int = 1024
-    image_height: int = 576
-    video_width: int = 960
-    video_height: int = 544
+    # Vertical 9:16 (TikTok / Reels / Shorts). Both SDXL and LTX-2.3
+    # accept these dimensions natively — 768x1344 is one of SDXL's
+    # trained aspect buckets, and LTX needs dims divisible by 32
+    # (544 = 32*17, 960 = 32*30) with a frames+1 length that's a
+    # multiple of 8 (handled by _frames_for_duration).
+    image_width: int = 768
+    image_height: int = 1344
+    video_width: int = 544
+    video_height: int = 960
     video_length_frames: int = 121
     video_fps: float = 25.0
 
@@ -73,6 +78,27 @@ class PipelineConfig:
     image_cfg: float = 6.5
     video_steps: int = 15
     video_cfg: float = 1.0
+
+    # IP-Adapter (cross-scene character consistency). After scene 1 renders
+    # we feed its SDXL output back into every subsequent scene through
+    # IPAdapterAdvanced, which patches the SDXL MODEL with image-derived
+    # tokens from CLIP-ViT-H. The character_sheet text prompt tells the
+    # model WHAT the character is; IP-Adapter shows it what the character
+    # already LOOKED like in scene 1. Together they lock the subject.
+    use_ip_adapter: bool = True
+    ip_adapter_model: str = "ip-adapter-plus_sdxl_vit-h.safetensors"
+    clip_vision_model: str = "CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors"
+    # 0.7 is a good balance: strong enough that the character stays
+    # recognisable, soft enough that the scene-specific pose / setting
+    # still reads clearly. Tune if you want more rigid (↑) or more
+    # flexible (↓) consistency.
+    ip_adapter_weight: float = 0.7
+    # "linear" applies the embeds evenly across denoising steps.
+    # "style transfer" biases towards look over composition.
+    # "prompt is more important" lets the text prompt win ties.
+    ip_adapter_weight_type: str = "linear"
+    ip_adapter_start_at: float = 0.0
+    ip_adapter_end_at: float = 1.0
 
     # Scenario workflow can take 15+ min when Qwen runs on CPU (default on
     # low-VRAM setups). 30 min default gives headroom for that + reasoning.
@@ -234,10 +260,21 @@ class ScenePipeline:
         global_style: str,
         seed: int,
         character_sheet: str = "",
+        reference_image: str | None = None,
     ) -> dict[str, Any]:
-        wf = copy.deepcopy(_load_workflow("scene_image_api.json"))
+        """Build the SDXL image workflow.
+
+        If ``reference_image`` is a non-empty string (a filename already
+        uploaded to ComfyUI's /input), load the IP-Adapter variant so the
+        render is conditioned on that image in addition to the text prompt.
+        Otherwise load the plain workflow (used for scene 1, which has no
+        reference yet).
+        """
+        use_ipa = bool(reference_image) and self.config.use_ip_adapter
+        wf_name = "scene_image_ipa_api.json" if use_ipa else "scene_image_api.json"
+        wf = copy.deepcopy(_load_workflow(wf_name))
         ckpt_id = _find_node_by_title(wf, "Load SDXL checkpoint")
-        latent_id = _find_node_by_title(wf, "Empty latent 16:9")
+        latent_id = _find_node_by_title(wf, "Empty latent 9:16")
         pos_id = _find_node_by_title(wf, "Positive prompt")
         neg_id = _find_node_by_title(wf, "Negative prompt")
         sampler_id = _find_node_by_title(wf, "Sample")
@@ -246,6 +283,19 @@ class ScenePipeline:
         wf[ckpt_id]["inputs"]["ckpt_name"] = self.config.sdxl_checkpoint
         wf[latent_id]["inputs"]["width"] = self.config.image_width
         wf[latent_id]["inputs"]["height"] = self.config.image_height
+
+        if use_ipa:
+            ipa_model_id = _find_node_by_title(wf, "Load IP-Adapter")
+            clip_vision_id = _find_node_by_title(wf, "Load CLIP Vision")
+            load_ref_id = _find_node_by_title(wf, "Load reference image")
+            apply_ipa_id = _find_node_by_title(wf, "Apply IP-Adapter")
+            wf[ipa_model_id]["inputs"]["ipadapter_file"] = self.config.ip_adapter_model
+            wf[clip_vision_id]["inputs"]["clip_name"] = self.config.clip_vision_model
+            wf[load_ref_id]["inputs"]["image"] = reference_image
+            wf[apply_ipa_id]["inputs"]["weight"] = self.config.ip_adapter_weight
+            wf[apply_ipa_id]["inputs"]["weight_type"] = self.config.ip_adapter_weight_type
+            wf[apply_ipa_id]["inputs"]["start_at"] = self.config.ip_adapter_start_at
+            wf[apply_ipa_id]["inputs"]["end_at"] = self.config.ip_adapter_end_at
 
         wf[pos_id]["inputs"]["text"] = self._compose_image_prompt(
             scene, global_style, character_sheet
@@ -265,8 +315,11 @@ class ScenePipeline:
         global_style: str,
         seed: int,
         character_sheet: str = "",
+        reference_image: str | None = None,
     ) -> tuple[ComfyOutputFile, Path]:
-        wf = self._build_image_workflow(scene, global_style, seed, character_sheet)
+        wf = self._build_image_workflow(
+            scene, global_style, seed, character_sheet, reference_image
+        )
         save_id = _find_node_by_title(wf, "Save scene image")
         history = self.client.run(wf, timeout=self.config.scene_timeout)
 
@@ -410,15 +463,29 @@ class ScenePipeline:
         result = PipelineResult(scenario=scenario, output_dir=self.config.output_dir)
         base_seed = self._seed()
 
+        # After scene 1 is rendered we feed its (already-uploaded) keyframe
+        # to IPAdapterAdvanced for every subsequent scene. This locks the
+        # visual identity of the main subject across the narrative without
+        # requiring the user to supply a reference image.
+        ip_adapter_reference: str | None = None
+
         for scene in scenario.scenes:
             log.info("[scene %d/%d] %s", scene.id, len(scenario.scenes), scene.description)
             img_seed = base_seed + 10 * scene.id
             vid_seed = base_seed + 10 * scene.id + 1
 
             _, image_local = self._render_scene_image(
-                scene, scenario.style, img_seed, scenario.character_sheet
+                scene,
+                scenario.style,
+                img_seed,
+                scenario.character_sheet,
+                reference_image=ip_adapter_reference,
             )
             input_name = self._upload_image_as_input(image_local)
+            if self.config.use_ip_adapter and ip_adapter_reference is None:
+                # The image uploaded as LTX keyframe is the same file we want
+                # IPAdapter to see in later scenes — reuse it.
+                ip_adapter_reference = input_name
             video_local = self._render_scene_video(
                 scene, input_name, scenario.style, vid_seed, scenario.character_sheet
             )

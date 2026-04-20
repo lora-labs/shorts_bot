@@ -25,6 +25,47 @@
     },
     "_meta": { "title": "Negative prompt" }
   },
+  "8": {
+    "class_type": "IPAdapterModelLoader",
+    "inputs": { "ipadapter_file": "ip-adapter-plus_sdxl_vit-h.safetensors" },
+    "_meta": { "title": "Load IP-Adapter" }
+  },
+  "9": {
+    "class_type": "CLIPVisionLoader",
+    "inputs": { "clip_name": "CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors" },
+    "_meta": { "title": "Load CLIP Vision" }
+  },
+  "10": {
+    "class_type": "LoadImage",
+    "inputs": { "image": "__REFERENCE_IMAGE__" },
+    "_meta": { "title": "Load reference image" }
+  },
+  "11": {
+    "class_type": "PrepImageForClipVision",
+    "inputs": {
+      "image": ["10", 0],
+      "interpolation": "LANCZOS",
+      "crop_position": "center",
+      "sharpening": 0.0
+    },
+    "_meta": { "title": "Prep reference for CLIP Vision" }
+  },
+  "12": {
+    "class_type": "IPAdapterAdvanced",
+    "inputs": {
+      "model": ["1", 0],
+      "ipadapter": ["8", 0],
+      "image": ["11", 0],
+      "clip_vision": ["9", 0],
+      "weight": 0.7,
+      "weight_type": "linear",
+      "combine_embeds": "concat",
+      "start_at": 0.0,
+      "end_at": 1.0,
+      "embeds_scaling": "V only"
+    },
+    "_meta": { "title": "Apply IP-Adapter" }
+  },
   "5": {
     "class_type": "KSamplerAdvanced",
     "inputs": {
@@ -37,7 +78,7 @@
       "start_at_step": 0,
       "end_at_step": 10000,
       "return_with_leftover_noise": "disable",
-      "model": ["1", 0],
+      "model": ["12", 0],
       "positive": ["3", 0],
       "negative": ["4", 0],
       "latent_image": ["2", 0]
