@@ -47,7 +47,7 @@
     "class_type": "LTXVPreprocess",
     "inputs": {
       "image": ["4", 0],
-      "img_compression": 4
+      "img_compression": 0
     },
     "_meta": { "title": "Preprocess keyframe" }
   },
