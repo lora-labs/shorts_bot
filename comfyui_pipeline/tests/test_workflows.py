@@ -14,6 +14,7 @@ WORKFLOW_DIR = Path(__file__).resolve().parent.parent / "workflows"
     [
         "script_gen_api.json",
         "scene_image_api.json",
+        "scene_image_ipa_api.json",
         "scene_video_api.json",
     ],
 )
@@ -31,16 +32,46 @@ def test_workflow_shape(filename: str) -> None:
         assert meta.get("title"), f"node {node_id} missing _meta.title (required by orchestrator)"
 
 
-def test_scene_video_links_resolve() -> None:
-    data = json.loads((WORKFLOW_DIR / "scene_video_api.json").read_text(encoding="utf-8"))
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "scene_image_api.json",
+        "scene_image_ipa_api.json",
+        "scene_video_api.json",
+    ],
+)
+def test_workflow_links_resolve(filename: str) -> None:
+    data = json.loads((WORKFLOW_DIR / filename).read_text(encoding="utf-8"))
     ids = set(data.keys())
     for node_id, node in data.items():
         for input_name, value in node["inputs"].items():
             if isinstance(value, list) and len(value) == 2 and isinstance(value[0], str):
                 src_id, _ = value
                 assert src_id in ids, (
-                    f"node {node_id}.{input_name} references missing source node {src_id}"
+                    f"{filename}: node {node_id}.{input_name} references missing source node {src_id}"
                 )
+
+
+def test_scene_image_ipa_workflow_has_ipadapter_nodes() -> None:
+    data = json.loads((WORKFLOW_DIR / "scene_image_ipa_api.json").read_text(encoding="utf-8"))
+    class_types = {n["class_type"] for n in data.values()}
+    for expected in (
+        "CheckpointLoaderSimple",
+        "IPAdapterModelLoader",
+        "CLIPVisionLoader",
+        "LoadImage",
+        "PrepImageForClipVision",
+        "IPAdapterAdvanced",
+        "KSamplerAdvanced",
+        "VAEDecode",
+        "SaveImage",
+    ):
+        assert expected in class_types, f"scene_image_ipa_api.json must contain {expected}"
+    # The IPAdapter output must feed the sampler's MODEL input (otherwise
+    # the reference image has zero effect on the denoised latent).
+    ipa_id = next(i for i, n in data.items() if n["class_type"] == "IPAdapterAdvanced")
+    sampler = next(n for n in data.values() if n["class_type"] == "KSamplerAdvanced")
+    assert sampler["inputs"]["model"] == [ipa_id, 0]
 
 
 def test_script_workflow_has_qwen_and_save_nodes() -> None:
