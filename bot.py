@@ -1,20 +1,26 @@
 """Telegram bot entry point.
 
+Conversation wizard
+-------------------
+The user is walked through a short multi-step dialog: **preset → idea →
+duration → scenes → confirm**. Each step (except the free-text *idea*)
+is an inline keyboard so the user just taps instead of typing.
+
 Commands
 --------
-* ``/start`` — legacy entry point. Asks for an idea, uses default preset.
-* ``/generate`` — same as /start but newer wording.
-* ``/generate_anime`` — forces the anime SDXL checkpoint.
-* ``/generate_cinematic`` — forces the cinematic photoreal checkpoint.
-* ``/generate_photo`` — forces the alternate photoreal (RealVisXL) checkpoint.
-* ``/generate_illustration`` — forces the stylized illustration checkpoint.
-* ``/generate_fast`` — fast-preview mode (3 scenes × 2 s each). Useful to
-  iterate on an idea before committing to a 30-minute full render.
-* ``/cancel`` — exit the conversation.
+* ``/generate`` — full wizard (asks preset, then idea, duration, scenes).
+* ``/generate_anime`` / ``/generate_cinematic`` / ``/generate_photo`` /
+  ``/generate_illustration`` — skip the preset step, go straight to
+  "опиши идею" with the preset already locked in.
+* ``/generate_fast`` — fast-preview preset; skips the duration and
+  scene-count pickers (both are overridden by fast-preview defaults).
+* ``/start`` — alias for ``/generate`` (legacy).
+* ``/cancel`` — abort the dialog at any point.
+* ``/help`` — list of commands.
 
-Each command accepts the idea either inline (``/generate_anime a ninja cat
-in Tokyo``) or in a follow-up message. Idle or malformed input times out
-and the conversation ends politely.
+Each command accepts the idea either inline (``/generate_anime a ninja
+cat in Tokyo``) or in a follow-up message. In the inline case the
+``AWAIT_IDEA`` state is skipped.
 
 Required environment
 --------------------
@@ -31,9 +37,10 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     ApplicationBuilder,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     ConversationHandler,
@@ -60,7 +67,13 @@ CREDENTIALS_FILE = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "credentials
 DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID") or None
 TELEGRAM_MAX_UPLOAD_MB = 50  # Telegram Bot API hard limit for outgoing files.
 
-AWAIT_IDEA = 0
+# Conversation states. Each represents the question the bot is currently
+# waiting for an answer to.
+CHOOSE_PRESET = 0
+AWAIT_IDEA = 1
+CHOOSE_DURATION = 2
+CHOOSE_SCENES = 3
+CONFIRM = 4
 
 
 # --------------------------------------------------------------------------- #
@@ -70,8 +83,8 @@ AWAIT_IDEA = 0
 
 @dataclass(frozen=True)
 class Preset:
-    """User-facing command preset. Applied on top of the default config
-    when the matching ``/generate_*`` command fires."""
+    """User-facing preset. Applied on top of the default config when the
+    matching command or inline button fires."""
 
     label: str
     style_preset_override: str | None = None
@@ -79,40 +92,53 @@ class Preset:
     overrides: dict[str, object] = field(default_factory=dict)
 
 
-# Telegram command suffix -> Preset. The suffix is also the identifier
-# stored in user_data so post-command message handler knows which config
-# to apply.
 PRESETS: dict[str, Preset] = {
-    "default": Preset(label="Default"),
-    "anime": Preset(
-        label="Anime / manga",
-        style_preset_override="anime",
-    ),
-    "cinematic": Preset(
-        label="Cinematic photo",
-        style_preset_override="cinematic_photo",
-    ),
-    "photo": Preset(
-        label="Photoreal",
-        style_preset_override="photoreal",
-    ),
-    "illustration": Preset(
-        label="Illustration / 3D",
-        style_preset_override="illustration",
-    ),
-    "fast": Preset(
-        label="Fast preview (3 scenes × 2 s)",
-        fast_preview=True,
-    ),
+    "default": Preset(label="Default / auto"),
+    "anime": Preset(label="Anime / manga", style_preset_override="anime"),
+    "cinematic": Preset(label="Cinematic photo", style_preset_override="cinematic_photo"),
+    "photo": Preset(label="Photoreal", style_preset_override="photoreal"),
+    "illustration": Preset(label="Illustration / 3D", style_preset_override="illustration"),
+    "fast": Preset(label="Fast preview (3 scenes × 2 s)", fast_preview=True),
 }
 
+# The preset picker shown by ``/generate``. Order matters — the two
+# rows of three below are laid out as the inline keyboard.
+PRESET_PICKER_ORDER: tuple[str, ...] = (
+    "cinematic", "photo", "anime",
+    "illustration", "default", "fast",
+)
 
-def _build_config(run_dir: Path, preset: Preset) -> PipelineConfig:
-    """Build a ``PipelineConfig`` for a preset, tolerating the case where
-    the PR #16 / #17 fields are not yet present in ``PipelineConfig``
-    (e.g. if someone runs this bot against an older branch) — unknown
-    fields are silently skipped instead of crashing at startup.
-    """
+# Duration picker: 3-20 s in handy steps. ``None`` means "Qwen decides".
+DURATION_CHOICES: tuple[tuple[str, float | None], ...] = (
+    ("3 s", 3.0),
+    ("5 s", 5.0),
+    ("8 s", 8.0),
+    ("10 s", 10.0),
+    ("15 s", 15.0),
+    ("20 s", 20.0),
+    ("Auto", None),
+)
+
+# Scene-count picker. ``None`` = let Qwen choose 3-6.
+SCENES_CHOICES: tuple[tuple[str, int | None], ...] = (
+    ("3", 3),
+    ("4", 4),
+    ("5", 5),
+    ("6", 6),
+    ("Auto", None),
+)
+
+
+def _build_config(
+    run_dir: Path,
+    preset: Preset,
+    total_duration: float | None = None,
+    scenes_count: int | None = None,
+) -> PipelineConfig:
+    """Build a ``PipelineConfig`` for a preset plus the wizard-collected
+    total duration and scene count. Tolerates older ``PipelineConfig``
+    versions missing some fields (e.g. if the bot is checked out ahead
+    of the orchestrator) by silently skipping unknown kwargs."""
     base_kwargs: dict[str, object] = {
         "comfyui_url": COMFYUI_URL,
         "output_dir": run_dir,
@@ -120,9 +146,10 @@ def _build_config(run_dir: Path, preset: Preset) -> PipelineConfig:
     optional_kwargs: dict[str, object] = {
         "style_preset_override": preset.style_preset_override,
         "fast_preview": preset.fast_preview,
+        "total_duration_hint": total_duration,
+        "scenes_count_hint": scenes_count,
     }
     optional_kwargs.update(preset.overrides)
-    # Keep only fields PipelineConfig actually declares.
     field_names = {f.name for f in PipelineConfig.__dataclass_fields__.values()}  # type: ignore[attr-defined]
     for k, v in optional_kwargs.items():
         if k in field_names:
@@ -181,10 +208,16 @@ async def generate_video(
     prompt_text: str,
     preset: Preset,
     request_id: str | int = 0,
+    total_duration: float | None = None,
+    scenes_count: int | None = None,
 ) -> Path:
     """Run the end-to-end ScenePipeline and return the final mp4 path."""
     run_dir = OUTPUT_DIR / f"run_{request_id}"
-    config = _build_config(run_dir, preset)
+    config = _build_config(
+        run_dir, preset,
+        total_duration=total_duration,
+        scenes_count=scenes_count,
+    )
 
     def _run() -> Path:
         pipeline = ScenePipeline(config)
@@ -200,100 +233,273 @@ async def generate_video(
 
 
 # --------------------------------------------------------------------------- #
-# Telegram handlers
+# Inline keyboard builders
 # --------------------------------------------------------------------------- #
 
 
-def _preset_from_update(update: Update) -> Preset:
-    """Derive the active preset from the triggering command name.
-    ``/generate_anime`` -> PRESETS['anime']; unknown or legacy /start -> default.
-    """
-    text = (update.message.text or "").strip() if update.message else ""
-    if not text.startswith("/"):
-        return PRESETS["default"]
-    cmd = text.split()[0].lstrip("/").split("@", 1)[0].lower()
-    if cmd in ("start", "generate"):
-        return PRESETS["default"]
-    if cmd.startswith("generate_"):
-        key = cmd[len("generate_"):]
-        return PRESETS.get(key, PRESETS["default"])
-    return PRESETS["default"]
+def _preset_keyboard() -> InlineKeyboardMarkup:
+    """Two rows of three preset buttons, in ``PRESET_PICKER_ORDER``."""
+    buttons: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
+    for i, key in enumerate(PRESET_PICKER_ORDER):
+        preset = PRESETS[key]
+        row.append(InlineKeyboardButton(preset.label, callback_data=f"preset:{key}"))
+        if (i + 1) % 3 == 0:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    return InlineKeyboardMarkup(buttons)
 
 
-def _inline_idea(update: Update) -> str:
-    """Extract the idea when the user passes it inline with the command:
-    ``/generate_anime a ninja cat in Tokyo`` -> ``"a ninja cat in Tokyo"``.
-    Returns empty string when nothing follows the command.
+def _duration_keyboard() -> InlineKeyboardMarkup:
+    """Two rows: six numeric durations + Auto."""
+    buttons: list[list[InlineKeyboardButton]] = [[], []]
+    for i, (label, value) in enumerate(DURATION_CHOICES):
+        token = "auto" if value is None else f"{value:g}"
+        buttons[0 if i < 4 else 1].append(
+            InlineKeyboardButton(label, callback_data=f"dur:{token}")
+        )
+    return InlineKeyboardMarkup([row for row in buttons if row])
+
+
+def _scenes_keyboard() -> InlineKeyboardMarkup:
+    row = [
+        InlineKeyboardButton(
+            label, callback_data=f"scenes:{'auto' if val is None else val}"
+        )
+        for label, val in SCENES_CHOICES
+    ]
+    return InlineKeyboardMarkup([row])
+
+
+def _confirm_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Старт", callback_data="confirm:yes"),
+            InlineKeyboardButton("✖️ Отмена", callback_data="confirm:no"),
+        ]
+    ])
+
+
+# --------------------------------------------------------------------------- #
+# Conversation helpers
+# --------------------------------------------------------------------------- #
+
+
+def _preset_key_from_command(command: str) -> str:
+    """Map the raw command text to a preset key. Used by both the
+    command dispatcher and the unit tests.
+
+    ``/start`` / ``/generate`` -> ``"default"`` (wizard chooses preset).
+    ``/generate_anime`` -> ``"anime"`` (skip preset picker).
+    Unknown suffixes fall back to ``"default"``.
     """
-    text = (update.message.text or "").strip() if update.message else ""
+    if not command.startswith("/"):
+        return "default"
+    head = command.split()[0].lstrip("/").split("@", 1)[0].lower()
+    if head in ("start", "generate"):
+        return "default"
+    if head.startswith("generate_"):
+        suffix = head[len("generate_"):]
+        if suffix in PRESETS:
+            return suffix
+    return "default"
+
+
+def _inline_idea(text: str) -> str:
+    """``/generate_anime ninja cat`` -> ``"ninja cat"``; non-command
+    text passes through; bare command returns ``""``."""
+    text = (text or "").strip()
     if not text.startswith("/"):
         return text
     parts = text.split(maxsplit=1)
     return parts[1].strip() if len(parts) > 1 else ""
 
 
-async def _command_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Unified entry for all /generate* and /start commands."""
-    preset = _preset_from_update(update)
-    context.user_data["preset_key"] = next(
-        (k for k, v in PRESETS.items() if v is preset), "default"
+def _summary(user_data: dict) -> str:
+    preset: Preset = user_data["preset"]
+    idea: str = user_data["idea"]
+    total: float | None = user_data.get("total_duration")
+    scenes: int | None = user_data.get("scenes_count")
+    dur_s = f"{total:g} s" if total else "auto"
+    scenes_s = str(scenes) if scenes else "auto"
+    return (
+        f"Пресет: *{preset.label}*\n"
+        f"Идея: _{idea}_\n"
+        f"Длина: *{dur_s}*\n"
+        f"Сцен: *{scenes_s}*"
     )
 
-    inline_idea = _inline_idea(update)
-    if inline_idea:
-        # User passed the idea inline — skip the follow-up prompt.
-        await _run_and_reply(update, context, inline_idea, preset)
-        return ConversationHandler.END
 
+# --------------------------------------------------------------------------- #
+# Conversation handlers
+# --------------------------------------------------------------------------- #
+
+
+async def _command_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Entry point for ``/start``, ``/generate`` and ``/generate_*``."""
+    text = (update.message.text or "") if update.message else ""
+    preset_key = _preset_key_from_command(text)
+    preset = PRESETS[preset_key]
+    context.user_data.clear()
+    context.user_data["preset_key"] = preset_key
+    context.user_data["preset"] = preset
+
+    inline_idea = _inline_idea(text)
+    if inline_idea:
+        context.user_data["idea"] = inline_idea
+        return await _after_idea(update, context)
+
+    if preset_key == "default":
+        # Full wizard — start with preset picker.
+        await update.message.reply_text(
+            "Выбери пресет визуала:",
+            reply_markup=_preset_keyboard(),
+        )
+        return CHOOSE_PRESET
+
+    # Shortcut command (/generate_anime etc.) — preset already locked,
+    # ask for the idea directly.
     await update.message.reply_text(
-        f"Пресет: *{preset.label}*\n"
-        "Опиши идею видео одним сообщением — я сгенерирую сценарий, "
-        "отрендерю кадры и пришлю готовый ролик.",
+        f"Пресет: *{preset.label}*\nОпиши идею видео одним сообщением.",
         parse_mode="Markdown",
     )
     return AWAIT_IDEA
 
 
-async def _handle_idea_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Second turn of the conversation: user sent the idea text."""
-    preset_key = context.user_data.get("preset_key", "default")
-    preset = PRESETS.get(preset_key, PRESETS["default"])
+async def _handle_preset_choice(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """CallbackQuery from the preset inline keyboard."""
+    query = update.callback_query
+    await query.answer()
+    _, key = (query.data or "").split(":", 1)
+    preset = PRESETS.get(key, PRESETS["default"])
+    context.user_data["preset_key"] = key
+    context.user_data["preset"] = preset
+    await query.edit_message_text(
+        f"Пресет: *{preset.label}*\nТеперь опиши идею одним сообщением.",
+        parse_mode="Markdown",
+    )
+    return AWAIT_IDEA
+
+
+async def _handle_idea_message(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """User typed the idea text — persist and move to the next step."""
     idea = (update.message.text or "").strip()
     if not idea:
-        await update.message.reply_text("Идея не распозналась. Попробуй ещё раз или /cancel.")
+        await update.message.reply_text(
+            "Идея не распозналась. Попробуй ещё раз или /cancel."
+        )
         return AWAIT_IDEA
-    await _run_and_reply(update, context, idea, preset)
+    context.user_data["idea"] = idea
+    return await _after_idea(update, context)
+
+
+async def _after_idea(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Next step after we have ``preset`` + ``idea`` in ``user_data``.
+    Fast-preview skips duration/scenes pickers (hardcoded by the
+    preset); other presets ask for both."""
+    preset: Preset = context.user_data["preset"]
+    if preset.fast_preview:
+        # Fast preview has its own per-scene duration / count hardcoded.
+        return await _ask_confirm(update, context)
+    await (update.effective_message or update.message).reply_text(
+        "Какая длина ролика целиком?",
+        reply_markup=_duration_keyboard(),
+    )
+    return CHOOSE_DURATION
+
+
+async def _handle_duration_choice(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    query = update.callback_query
+    await query.answer()
+    _, token = (query.data or "").split(":", 1)
+    context.user_data["total_duration"] = None if token == "auto" else float(token)
+    await query.edit_message_text(
+        f"Длина: *{token} s*" if token != "auto" else "Длина: *auto*",
+        parse_mode="Markdown",
+    )
+    await query.message.reply_text(
+        "Сколько сцен?",
+        reply_markup=_scenes_keyboard(),
+    )
+    return CHOOSE_SCENES
+
+
+async def _handle_scenes_choice(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    query = update.callback_query
+    await query.answer()
+    _, token = (query.data or "").split(":", 1)
+    context.user_data["scenes_count"] = None if token == "auto" else int(token)
+    return await _ask_confirm(update, context)
+
+
+async def _ask_confirm(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    msg = update.effective_message or update.message
+    await msg.reply_text(
+        _summary(context.user_data) + "\n\nЗапускаем?",
+        parse_mode="Markdown",
+        reply_markup=_confirm_keyboard(),
+    )
+    return CONFIRM
+
+
+async def _handle_confirm(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    query = update.callback_query
+    await query.answer()
+    _, choice = (query.data or "").split(":", 1)
+    if choice != "yes":
+        await query.edit_message_text("Отменено.")
+        return ConversationHandler.END
+    await query.edit_message_text(_summary(context.user_data) + "\n\nГенерирую…")
+    await _run_and_reply(update, context)
     return ConversationHandler.END
 
 
 async def _run_and_reply(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    idea: str,
-    preset: Preset,
+    update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    await update.message.reply_text(
-        f"Принято (пресет: {preset.label}). Генерирую сценарий, кадры и видео — "
-        "это может занять несколько минут."
-    )
+    preset: Preset = context.user_data["preset"]
+    idea: str = context.user_data["idea"]
+    total = context.user_data.get("total_duration")
+    scenes = context.user_data.get("scenes_count")
+    chat_id = update.effective_chat.id
+    reply_to = update.effective_message
 
     try:
         video_path = await generate_video(
-            idea, preset, request_id=update.effective_chat.id
+            idea, preset,
+            request_id=chat_id,
+            total_duration=total,
+            scenes_count=scenes,
         )
     except PipelineError as exc:
-        await update.message.reply_text(f"Ошибка генерации: {exc}")
+        await reply_to.reply_text(f"Ошибка генерации: {exc}")
         return
     except Exception as exc:  # noqa: BLE001
         log.exception("Unhandled pipeline error")
-        await update.message.reply_text(f"Неожиданная ошибка: {exc}")
+        await reply_to.reply_text(f"Неожиданная ошибка: {exc}")
         return
 
     size_mb = video_path.stat().st_size / (1024 * 1024)
     try:
         if size_mb <= TELEGRAM_MAX_UPLOAD_MB:
             with video_path.open("rb") as vf:
-                await update.message.reply_video(video=vf)
+                await reply_to.reply_video(video=vf)
         else:
             raise RuntimeError(
                 f"video {size_mb:.1f} MB > Telegram limit, uploading to Drive"
@@ -302,28 +508,30 @@ async def _run_and_reply(
         log.warning("Direct video send failed, falling back to Drive: %s", exc)
         try:
             url = upload_file_to_drive(video_path)
-            await update.message.reply_text(f"Готово! Видео: {url}")
+            await reply_to.reply_text(f"Готово! Видео: {url}")
         except Exception as drive_exc:  # noqa: BLE001
-            await update.message.reply_text(
+            await reply_to.reply_text(
                 f"Видео готово локально ({video_path}), но отправить в чат не удалось: "
                 f"{drive_exc}"
             )
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("Диалог завершён.")
+    msg = update.effective_message or update.message
+    if msg is not None:
+        await msg.reply_text("Диалог завершён.")
     return ConversationHandler.END
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     lines = [
         "*Команды*",
-        "/generate — обычная генерация (автовыбор стиля)",
-        "/generate\\_anime — аниме / манга",
+        "/generate — мастер: пресет → идея → длина → сцены → подтверждение",
+        "/generate\\_anime — аниме / манга (пропускает выбор пресета)",
         "/generate\\_cinematic — кинематографичное фото",
         "/generate\\_photo — фотореализм (RealVis)",
         "/generate\\_illustration — 3D / иллюстрация",
-        "/generate\\_fast — быстрый превью-режим (3 сцены × 2 сек)",
+        "/generate\\_fast — быстрый превью-режим (3 сцены × 2 сек, без выбора длины)",
         "/cancel — прервать диалог",
         "",
         "Идею можно передать сразу после команды одним сообщением, например:",
@@ -345,8 +553,20 @@ def _build_conv_handler() -> ConversationHandler:
     return ConversationHandler(
         entry_points=entry_points,
         states={
+            CHOOSE_PRESET: [
+                CallbackQueryHandler(_handle_preset_choice, pattern=r"^preset:"),
+            ],
             AWAIT_IDEA: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, _handle_idea_message),
+            ],
+            CHOOSE_DURATION: [
+                CallbackQueryHandler(_handle_duration_choice, pattern=r"^dur:"),
+            ],
+            CHOOSE_SCENES: [
+                CallbackQueryHandler(_handle_scenes_choice, pattern=r"^scenes:"),
+            ],
+            CONFIRM: [
+                CallbackQueryHandler(_handle_confirm, pattern=r"^confirm:"),
             ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],

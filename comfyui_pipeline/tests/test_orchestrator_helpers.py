@@ -712,6 +712,16 @@ def test_apply_idea_hints_injects_scene_count_and_duration(tmp_path) -> None:
     assert "5 seconds" in out
 
 
+def test_apply_idea_hints_injects_total_duration(tmp_path) -> None:
+    """PR #22: the Telegram wizard's total-duration picker must reach
+    Qwen via the idea prompt so it can split the time across scenes."""
+    cfg = PipelineConfig(output_dir=tmp_path, total_duration_hint=12.0)
+    pipeline = ScenePipeline(cfg)
+    out = pipeline._apply_idea_hints("hero on a rooftop")
+    assert "Total video length" in out
+    assert "12 seconds" in out
+
+
 def test_apply_idea_hints_is_noop_when_no_hints(tmp_path) -> None:
     cfg = PipelineConfig(output_dir=tmp_path)
     pipeline = ScenePipeline(cfg)
