@@ -127,6 +127,36 @@ def test_build_script_workflow_round_trips(tmp_path) -> None:
     json.dumps(wf)
 
 
+def test_qwen_node_forces_local_files_only_for_local_paths(tmp_path) -> None:
+    """If ``model_name_or_path`` points at a real on-disk directory, the
+    Qwen node must pass ``local_files_only=True`` to transformers so it
+    never tries to contact huggingface.co (which re-downloads shards if
+    the local snapshot doesn't match the exact revision HF expects, or
+    stalls on xet-token requests behind a VPN).
+
+    For a bare HF repo id (``Qwen/Qwen3-8B``), ``local_files_only`` must
+    stay False so a fresh install can still download the model."""
+    import sys
+    from pathlib import Path
+
+    # Tests run from repo root; make sure the custom_nodes dir is on sys.path
+    # even if conftest hasn't done it.
+    custom_nodes = Path(__file__).parent.parent / "custom_nodes" / "scene_pipeline"
+    if str(custom_nodes) not in sys.path:
+        sys.path.insert(0, str(custom_nodes))
+
+    import qwen_node
+
+    # Non-existent path / bare HF id → not treated as local.
+    assert qwen_node._looks_like_local_path("Qwen/Qwen3-8B") is False
+    assert qwen_node._looks_like_local_path("not/a/real/path") is False
+
+    # Real on-disk dir → treated as local.
+    local_dir = tmp_path / "Qwen3-8B"
+    local_dir.mkdir()
+    assert qwen_node._looks_like_local_path(str(local_dir)) is True
+
+
 def test_pipeline_config_defaults_are_low_vram_friendly() -> None:
     """Defaults should work on 12 GB GPUs out of the box: Qwen splits across
     CPU+GPU via accelerate and unloads itself before SDXL/LTX run."""
