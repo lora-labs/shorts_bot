@@ -46,7 +46,7 @@ class PipelineConfig:
 
     comfyui_url: str = "http://127.0.0.1:8188"
     output_dir: Path = Path("output/scenes")
-    sdxl_checkpoint: str = "sd_xl_base_1.0.safetensors"
+    sdxl_checkpoint: str = "juggernautXL_ragnarokBy.safetensors"
     # Style-preset routing table. Qwen tags each scenario with a preset
     # ('cinematic_photo', 'anime', etc.); the orchestrator looks the tag
     # up here to pick which SDXL checkpoint renders the scenes. Files
@@ -56,12 +56,35 @@ class PipelineConfig:
     # local ``models/checkpoints/`` layout.
     checkpoint_presets: dict[str, str] = field(
         default_factory=lambda: {
-            "cinematic_photo": "juggernautXL_v9.safetensors",
-            "photoreal": "realvisXL_v50.safetensors",
-            "anime": "animagineXL_40.safetensors",
-            "illustration": "dreamshaperXL_v2Turbo.safetensors",
+            "cinematic_photo": "juggernautXL_ragnarokBy.safetensors",
+            "photoreal": "realvisxlV50_v50Bakedvae.safetensors",
+            "anime": "illustriousXL20_v20.safetensors",
+            "illustration": "dreamshaperXL_alpha2Xl10.safetensors",
         }
     )
+    # LoRA stacks applied on top of each preset's checkpoint. Each entry
+    # is a list of ``(lora_filename, strength)`` tuples; strengths apply
+    # to both MODEL and CLIP. Presets not listed here render without any
+    # LoRAs. Missing files fall through with a warning (same graceful
+    # degradation as ``checkpoint_presets``) so a partial model download
+    # doesn't kill the whole run. Override from the call-site to match
+    # your local ``models/loras/`` layout.
+    preset_loras: dict[str, list[tuple[str, float]]] = field(
+        default_factory=lambda: {
+            # Cinematic look: film stock emulation + sharpness boost.
+            "cinematic_photo": [
+                ("SDXL_FILM_PHOTOGRAPHY_STYLE_V1.safetensors", 0.6),
+                ("add-detail-xl.safetensors", 0.3),
+            ],
+            # General detail tweaker for photoreal / stylized renders.
+            "photoreal": [("add-detail-xl.safetensors", 0.3)],
+            "illustration": [("add-detail-xl.safetensors", 0.3)],
+        }
+    )
+    # Directory on the ComfyUI machine that contains SDXL LoRAs. Used
+    # for the same existence check as ``sdxl_checkpoints_dir``. ``None``
+    # disables the check.
+    sdxl_loras_dir: str | None = None
     # Optional user override: when set, wins over the scenario's own
     # ``style_preset``. Gradio / Telegram bot expose this as a dropdown
     # so the user can force a specific look. ``None`` or ``"auto"``
@@ -312,6 +335,26 @@ class ScenePipeline:
             parts.append(global_style.strip())
         return ", ".join(parts)
 
+    def _resolve_preset_name(self, scenario_preset: str | None) -> str:
+        """Resolve the effective preset name (post-override, post-normalisation).
+
+        Returns either a concrete preset id ('cinematic_photo', 'anime', …)
+        or ``'auto'`` when the caller should fall back to the configured
+        default checkpoint / no LoRAs.
+        """
+        # Mirror Scenario._normalize_preset so callers can pass sloppy
+        # casing / spaces / hyphens from UI labels without silently
+        # missing the checkpoint_presets key.
+        override = (
+            (self.config.style_preset_override or "")
+            .strip()
+            .lower()
+            .replace("-", "_")
+            .replace(" ", "_")
+        )
+        preset = override if override and override != "auto" else (scenario_preset or "auto")
+        return preset or "auto"
+
     def _resolve_sdxl_checkpoint(self, scenario_preset: str | None) -> str:
         """Decide which SDXL checkpoint file to load for this run.
 
@@ -325,18 +368,8 @@ class ScenePipeline:
         ``config.sdxl_checkpoint`` and log a warning so the user can tell
         routing was bypassed.
         """
-        # Mirror Scenario._normalize_preset so callers can pass sloppy
-        # casing / spaces / hyphens from UI labels without silently
-        # missing the checkpoint_presets key.
-        override = (
-            (self.config.style_preset_override or "")
-            .strip()
-            .lower()
-            .replace("-", "_")
-            .replace(" ", "_")
-        )
-        preset = override if override and override != "auto" else (scenario_preset or "auto")
-        if preset == "auto" or not preset:
+        preset = self._resolve_preset_name(scenario_preset)
+        if preset == "auto":
             return self.config.sdxl_checkpoint
         filename = self.config.checkpoint_presets.get(preset)
         if not filename:
@@ -356,6 +389,85 @@ class ScenePipeline:
         log.info("Style preset %r -> SDXL checkpoint %r", preset, filename)
         return filename
 
+    def _resolve_preset_loras(
+        self, scenario_preset: str | None
+    ) -> list[tuple[str, float]]:
+        """Return the LoRA stack to chain on top of the preset's checkpoint.
+
+        Follows the same preset-resolution rules as ``_resolve_sdxl_checkpoint``.
+        Entries whose file is missing (per optional ``sdxl_loras_dir``) are
+        filtered out with a warning so a partial download doesn't abort the
+        whole run.
+        """
+        preset = self._resolve_preset_name(scenario_preset)
+        if preset == "auto":
+            return []
+        stack = self.config.preset_loras.get(preset) or []
+        if not stack:
+            return []
+        verified: list[tuple[str, float]] = []
+        for entry in stack:
+            filename, strength = entry
+            if self.config.sdxl_loras_dir:
+                candidate = Path(self.config.sdxl_loras_dir) / filename
+                if not candidate.exists():
+                    log.warning(
+                        "Preset %r LoRA %r not found on disk (checked %s); skipping.",
+                        preset, filename, candidate,
+                    )
+                    continue
+            verified.append((filename, float(strength)))
+        if verified:
+            log.info(
+                "Style preset %r -> LoRA stack: %s",
+                preset,
+                ", ".join(f"{name}@{s:.2f}" for name, s in verified),
+            )
+        return verified
+
+    @staticmethod
+    def _inject_loras(
+        wf: dict[str, Any],
+        ckpt_id: str,
+        loras: list[tuple[str, float]],
+        consumers: list[tuple[str, str, int]],
+    ) -> None:
+        """Insert a chain of ``LoraLoader`` nodes between the checkpoint
+        and the given consumers.
+
+        ``consumers`` is a list of ``(node_id, input_name, slot)`` tuples
+        that currently reference ``[ckpt_id, slot]`` and should be
+        rewritten to read from the last LoRA in the chain. ``slot`` 0
+        means MODEL, 1 means CLIP (matching SDXL CheckpointLoaderSimple
+        outputs).
+        """
+        if not loras:
+            return
+        existing_ids = [int(k) for k in wf.keys() if str(k).isdigit()]
+        next_id = max(existing_ids) + 1 if existing_ids else 100
+        prev_model: list[Any] = [ckpt_id, 0]
+        prev_clip: list[Any] = [ckpt_id, 1]
+        for idx, (lora_name, strength) in enumerate(loras, start=1):
+            node_id = str(next_id)
+            next_id += 1
+            wf[node_id] = {
+                "class_type": "LoraLoader",
+                "inputs": {
+                    "lora_name": lora_name,
+                    "strength_model": strength,
+                    "strength_clip": strength,
+                    "model": prev_model,
+                    "clip": prev_clip,
+                },
+                "_meta": {"title": f"LoRA {idx}: {lora_name}"},
+            }
+            prev_model = [node_id, 0]
+            prev_clip = [node_id, 1]
+        for node_id, input_name, slot in consumers:
+            wf[node_id]["inputs"][input_name] = (
+                prev_model if slot == 0 else prev_clip
+            )
+
     def _build_image_workflow(
         self,
         scene: Scene,
@@ -364,6 +476,7 @@ class ScenePipeline:
         character_sheet: str = "",
         reference_image: str | None = None,
         sdxl_checkpoint: str | None = None,
+        loras: list[tuple[str, float]] | None = None,
     ) -> dict[str, Any]:
         """Build the SDXL image workflow.
 
@@ -372,6 +485,13 @@ class ScenePipeline:
         render is conditioned on that image in addition to the text prompt.
         Otherwise load the plain workflow (used for scene 1, which has no
         reference yet).
+
+        ``loras`` is an optional list of ``(filename, strength)`` tuples
+        applied on top of the checkpoint. The LoRAs are chained (first
+        entry wraps the checkpoint, later entries wrap the previous
+        LoRA's output) and their MODEL/CLIP outputs replace the direct
+        checkpoint references in the downstream IPA / sampler / text
+        encode nodes.
         """
         use_ipa = bool(reference_image) and self.config.use_ip_adapter
         wf_name = "scene_image_ipa_api.json" if use_ipa else "scene_image_api.json"
@@ -400,6 +520,20 @@ class ScenePipeline:
             wf[apply_ipa_id]["inputs"]["start_at"] = self.config.ip_adapter_start_at
             wf[apply_ipa_id]["inputs"]["end_at"] = self.config.ip_adapter_end_at
 
+        if loras:
+            # IPA node wraps MODEL, sampler reads it; text encoders read
+            # CLIP directly from the checkpoint. Rewire only the nodes
+            # that currently point at the checkpoint outputs.
+            consumers: list[tuple[str, str, int]] = [
+                (pos_id, "clip", 1),
+                (neg_id, "clip", 1),
+            ]
+            if use_ipa:
+                consumers.append((apply_ipa_id, "model", 0))
+            else:
+                consumers.append((sampler_id, "model", 0))
+            self._inject_loras(wf, ckpt_id, loras, consumers)
+
         wf[pos_id]["inputs"]["text"] = self._compose_image_prompt(
             scene, global_style, character_sheet
         )
@@ -420,10 +554,12 @@ class ScenePipeline:
         character_sheet: str = "",
         reference_image: str | None = None,
         sdxl_checkpoint: str | None = None,
+        loras: list[tuple[str, float]] | None = None,
     ) -> tuple[ComfyOutputFile, Path]:
         wf = self._build_image_workflow(
             scene, global_style, seed, character_sheet, reference_image,
             sdxl_checkpoint=sdxl_checkpoint,
+            loras=loras,
         )
         save_id = _find_node_by_title(wf, "Save scene image")
         history = self.client.run(wf, timeout=self.config.scene_timeout)
@@ -620,6 +756,9 @@ class ScenePipeline:
         active_checkpoint = self._resolve_sdxl_checkpoint(
             getattr(scenario, "style_preset", None)
         )
+        active_loras = self._resolve_preset_loras(
+            getattr(scenario, "style_preset", None)
+        )
 
         for scene in scenario.scenes:
             log.info("[scene %d/%d] %s", scene.id, len(scenario.scenes), scene.description)
@@ -633,6 +772,7 @@ class ScenePipeline:
                 scenario.character_sheet,
                 reference_image=ip_adapter_reference,
                 sdxl_checkpoint=active_checkpoint,
+                loras=active_loras,
             )
             input_name = self._upload_image_as_input(image_local)
             if self.config.use_ip_adapter and ip_adapter_reference is None:

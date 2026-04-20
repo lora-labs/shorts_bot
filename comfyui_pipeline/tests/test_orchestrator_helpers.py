@@ -498,6 +498,153 @@ def test_build_image_workflow_uses_override_checkpoint(tmp_path) -> None:
     assert ckpt == "animagine.safetensors"
 
 
+def test_resolve_preset_loras_returns_empty_for_auto(tmp_path) -> None:
+    cfg = PipelineConfig(
+        output_dir=tmp_path,
+        preset_loras={"cinematic_photo": [("film.safetensors", 0.6)]},
+    )
+    pipeline = ScenePipeline(cfg)
+    assert pipeline._resolve_preset_loras("auto") == []
+    assert pipeline._resolve_preset_loras(None) == []
+
+
+def test_resolve_preset_loras_maps_preset_to_stack(tmp_path) -> None:
+    cfg = PipelineConfig(
+        output_dir=tmp_path,
+        preset_loras={
+            "cinematic_photo": [
+                ("film.safetensors", 0.6),
+                ("detail.safetensors", 0.3),
+            ],
+        },
+    )
+    pipeline = ScenePipeline(cfg)
+    stack = pipeline._resolve_preset_loras("cinematic_photo")
+    assert stack == [("film.safetensors", 0.6), ("detail.safetensors", 0.3)]
+
+
+def test_resolve_preset_loras_override_wins_and_is_normalised(tmp_path) -> None:
+    cfg = PipelineConfig(
+        output_dir=tmp_path,
+        preset_loras={"cinematic_photo": [("film.safetensors", 0.6)]},
+        style_preset_override="Cinematic-Photo",
+    )
+    pipeline = ScenePipeline(cfg)
+    assert pipeline._resolve_preset_loras("anime") == [("film.safetensors", 0.6)]
+
+
+def test_resolve_preset_loras_skips_missing_files_on_disk(tmp_path) -> None:
+    """A partial LoRA download must not abort the run — missing entries
+    are dropped, present ones stay."""
+    (tmp_path / "detail.safetensors").write_bytes(b"fake")
+    cfg = PipelineConfig(
+        output_dir=tmp_path,
+        preset_loras={
+            "cinematic_photo": [
+                ("film.safetensors", 0.6),  # missing
+                ("detail.safetensors", 0.3),  # present
+            ],
+        },
+        sdxl_loras_dir=str(tmp_path),
+    )
+    pipeline = ScenePipeline(cfg)
+    assert pipeline._resolve_preset_loras("cinematic_photo") == [
+        ("detail.safetensors", 0.3),
+    ]
+
+
+def test_build_image_workflow_chains_loras_into_sampler_and_text_encoders(tmp_path) -> None:
+    """LoRAs must wrap the checkpoint so both MODEL (to sampler) and
+    CLIP (to text encoders) go through the LoRA chain; otherwise the
+    conditioning ignores the LoRA and only the UNet is patched."""
+    cfg = PipelineConfig(output_dir=tmp_path, sdxl_checkpoint="default.safetensors")
+    pipeline = ScenePipeline(cfg)
+    scene = Scene(
+        id=1, description="x", image_prompt="a cat",
+        video_prompt="x", duration_seconds=3.0,
+    )
+    loras = [("film.safetensors", 0.6), ("detail.safetensors", 0.3)]
+    wf = pipeline._build_image_workflow(scene, "cinematic", seed=1, loras=loras)
+
+    lora_ids = [nid for nid, n in wf.items() if n["class_type"] == "LoraLoader"]
+    assert len(lora_ids) == 2
+    lora_ids_sorted = sorted(lora_ids, key=int)
+    first, second = lora_ids_sorted
+    ckpt_id = orch._find_node_by_title(wf, "Load SDXL checkpoint")
+    sampler_id = orch._find_node_by_title(wf, "Sample")
+    pos_id = orch._find_node_by_title(wf, "Positive prompt")
+    neg_id = orch._find_node_by_title(wf, "Negative prompt")
+
+    # First LoRA wraps the checkpoint.
+    assert wf[first]["inputs"]["model"] == [ckpt_id, 0]
+    assert wf[first]["inputs"]["clip"] == [ckpt_id, 1]
+    assert wf[first]["inputs"]["lora_name"] == "film.safetensors"
+    assert wf[first]["inputs"]["strength_model"] == 0.6
+    assert wf[first]["inputs"]["strength_clip"] == 0.6
+    # Second LoRA wraps the first.
+    assert wf[second]["inputs"]["model"] == [first, 0]
+    assert wf[second]["inputs"]["clip"] == [first, 1]
+    # Downstream consumers read from the last LoRA, not the checkpoint.
+    assert wf[sampler_id]["inputs"]["model"] == [second, 0]
+    assert wf[pos_id]["inputs"]["clip"] == [second, 1]
+    assert wf[neg_id]["inputs"]["clip"] == [second, 1]
+
+
+def test_build_image_workflow_chains_loras_through_ip_adapter(tmp_path) -> None:
+    """With IPA enabled the LoRA chain must feed IPAdapterAdvanced
+    (which patches MODEL), and the text encoders must still read CLIP
+    from the last LoRA."""
+    cfg = PipelineConfig(
+        output_dir=tmp_path,
+        sdxl_checkpoint="default.safetensors",
+        use_ip_adapter=True,
+    )
+    pipeline = ScenePipeline(cfg)
+    scene = Scene(
+        id=2, description="x", image_prompt="a cat",
+        video_prompt="x", duration_seconds=3.0,
+    )
+    loras = [("detail.safetensors", 0.3)]
+    wf = pipeline._build_image_workflow(
+        scene, "cinematic", seed=1,
+        reference_image="scene_01.png",
+        loras=loras,
+    )
+    lora_ids = [nid for nid, n in wf.items() if n["class_type"] == "LoraLoader"]
+    assert len(lora_ids) == 1
+    lora_id = lora_ids[0]
+    apply_ipa_id = orch._find_node_by_title(wf, "Apply IP-Adapter")
+    sampler_id = orch._find_node_by_title(wf, "Sample")
+    pos_id = orch._find_node_by_title(wf, "Positive prompt")
+
+    # IPA reads MODEL from the LoRA (not the checkpoint) so the LoRA
+    # weights are part of the model that IPA patches.
+    assert wf[apply_ipa_id]["inputs"]["model"] == [lora_id, 0]
+    # Sampler still reads MODEL from the IPA node (unchanged).
+    assert wf[sampler_id]["inputs"]["model"][0] == apply_ipa_id
+    # Text encoder reads CLIP from the LoRA.
+    assert wf[pos_id]["inputs"]["clip"] == [lora_id, 1]
+
+
+def test_build_image_workflow_without_loras_leaves_graph_untouched(tmp_path) -> None:
+    cfg = PipelineConfig(output_dir=tmp_path, sdxl_checkpoint="default.safetensors")
+    pipeline = ScenePipeline(cfg)
+    scene = Scene(
+        id=1, description="x", image_prompt="a cat",
+        video_prompt="x", duration_seconds=3.0,
+    )
+    wf_with_empty = pipeline._build_image_workflow(
+        scene, "cinematic", seed=1, loras=[]
+    )
+    wf_without = pipeline._build_image_workflow(scene, "cinematic", seed=1)
+    assert not [
+        nid for nid, n in wf_with_empty.items() if n["class_type"] == "LoraLoader"
+    ]
+    assert not [
+        nid for nid, n in wf_without.items() if n["class_type"] == "LoraLoader"
+    ]
+
+
 def test_negative_prompt_override_is_appended(tmp_path) -> None:
     """Global negative override from the UI must append to the scene's own
     negatives without losing the scenario-generated ones."""
