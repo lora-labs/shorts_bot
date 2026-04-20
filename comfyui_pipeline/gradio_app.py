@@ -64,8 +64,9 @@ def _build_config(
         ip_adapter_weight=float(ipa_weight),
         seed=int(seed_int) if seed_int and int(seed_int) > 0 else None,
         fast_preview=bool(fast_preview),
-        scenes_count_hint=int(scenes_count) if scenes_count else None,
-        scene_duration_hint=float(duration) if duration else None,
+        # 0 on either slider means "no preference — let Qwen pick".
+        scenes_count_hint=int(scenes_count) if scenes_count and int(scenes_count) > 0 else None,
+        scene_duration_hint=float(duration) if duration and float(duration) > 0 else None,
         negative_prompt_override=negative_extra.strip(),
     )
     return cfg
@@ -148,12 +149,14 @@ def build_demo() -> gr.Blocks:
                     value="9:16 vertical (Shorts/Reels)",
                 )
                 scenes_count = gr.Slider(
-                    label="Количество сцен",
-                    minimum=3, maximum=8, step=1, value=5,
+                    label="Количество сцен (0 = авто)",
+                    minimum=0, maximum=8, step=1, value=0,
+                    info="0 — Qwen сам решит по сюжету",
                 )
                 duration = gr.Slider(
-                    label="Длительность сцены (сек)",
-                    minimum=2.0, maximum=8.0, step=0.5, value=4.0,
+                    label="Длительность сцены, сек (0 = авто)",
+                    minimum=0.0, maximum=8.0, step=0.5, value=0.0,
+                    info="0 — Qwen сам решит по сюжету",
                 )
             with gr.Row():
                 ipa_weight = gr.Slider(
