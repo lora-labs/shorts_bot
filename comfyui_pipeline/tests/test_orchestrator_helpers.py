@@ -62,6 +62,62 @@ def test_build_image_workflow_uses_ksampler_advanced(tmp_path) -> None:
     assert "seed" not in sampler["inputs"]
 
 
+def test_image_prompt_prepends_character_sheet(tmp_path) -> None:
+    """The character_sheet is the single source of truth for the subject's
+    appearance. It must be prepended (so tokens land near the front of the
+    CLIP context, where SDXL weights them highest) to every scene's prompt."""
+    cfg = PipelineConfig(output_dir=tmp_path)
+    pipeline = ScenePipeline(cfg)
+    scene = Scene(
+        id=1,
+        description="opens door",
+        image_prompt="in a cozy kitchen at golden hour, medium shot",
+        video_prompt="hand opens door slowly",
+        duration_seconds=3.0,
+    )
+    sheet = "fluffy white cat with one blue eye and one green eye, red bowtie"
+    wf = pipeline._build_image_workflow(scene, "cinematic", seed=1, character_sheet=sheet)
+    pos = wf[orch._find_node_by_title(wf, "Positive prompt")]["inputs"]["text"]
+    # character_sheet must appear BEFORE the scene's image_prompt.
+    assert pos.index(sheet) < pos.index("cozy kitchen")
+    assert "cinematic" in pos
+
+
+def test_video_prompt_prepends_character_sheet(tmp_path) -> None:
+    cfg = PipelineConfig(output_dir=tmp_path)
+    pipeline = ScenePipeline(cfg)
+    scene = Scene(
+        id=2,
+        description="rides skateboard",
+        image_prompt="on a sunny street",
+        video_prompt="skateboard rolls forward, camera follows",
+        duration_seconds=3.0,
+    )
+    sheet = "orange tabby cat wearing red helmet"
+    wf = pipeline._build_video_workflow(
+        scene, "keyframe.png", "cinematic", seed=1, character_sheet=sheet
+    )
+    vid_pos = wf[orch._find_node_by_title(wf, "Video positive prompt")]["inputs"]["text"]
+    assert vid_pos.index(sheet) < vid_pos.index("skateboard rolls")
+
+
+def test_prompt_composition_handles_empty_character_sheet(tmp_path) -> None:
+    """Backwards compat: scenarios without a character_sheet (e.g. from an
+    older Qwen prompt template) must still produce a valid prompt."""
+    cfg = PipelineConfig(output_dir=tmp_path)
+    pipeline = ScenePipeline(cfg)
+    scene = Scene(
+        id=1,
+        description="x",
+        image_prompt="a lonely lighthouse",
+        video_prompt="waves crash",
+        duration_seconds=3.0,
+    )
+    prompt = pipeline._compose_image_prompt(scene, "cinematic", "")
+    assert prompt.startswith("a lonely lighthouse")
+    assert "cinematic" in prompt
+
+
 def test_build_video_workflow_wires_ltx23_av_nodes(tmp_path) -> None:
     cfg = PipelineConfig(
         output_dir=tmp_path,

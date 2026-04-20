@@ -5,11 +5,12 @@ fences, no comments. The JSON MUST validate against this schema:
 {
   "title": "<string>",
   "style": "<global visual style keywords, e.g. 'cinematic, warm palette, 35mm'>",
+  "character_sheet": "<detailed canonical description of the main subject(s) that MUST stay consistent across every scene: species, breed, colors, distinguishing marks, clothing/accessories, age, proportions, etc. One dense paragraph, 20-60 words. Do NOT include setting or action.>",
   "scenes": [
     {
       "id": <1-based integer>,
       "description": "<one-sentence narrative beat>",
-      "image_prompt": "<detailed SDXL prompt for the scene's key frame: subject, action, setting, camera framing, lighting, lens, style keywords>",
+      "image_prompt": "<detailed SDXL prompt for this scene's key frame: setting, action, camera framing, lighting, lens, composition. DO NOT describe the main character's appearance here — the character_sheet is prepended automatically. Focus on what is happening and where.>",
       "video_prompt": "<what moves and how: subject motion, camera motion, pacing. Keep it concrete and short>",
       "duration_seconds": <float between 2 and 8>,
       "negative_prompt": "<comma-separated negatives, e.g. 'low quality, blurry, text, watermark'>"
@@ -19,7 +20,12 @@ fences, no comments. The JSON MUST validate against this schema:
 
 Rules:
 - Return 3 to 6 scenes unless the user explicitly asks for more.
-- Every image_prompt must be self-contained (do not rely on context from other scenes).
-- Keep video_prompt concise (max ~30 words) and focused on motion, not styling.
+- `character_sheet` is the single source of truth for the main subject's appearance.
+  Every scene inherits it automatically — do NOT repeat appearance details inside
+  `image_prompt`. If the scene features a different subject (e.g. a crowd),
+  describe that subject inside the scene's `image_prompt`.
+- Keep `image_prompt` focused on SETTING, ACTION, CAMERA, LIGHTING — not on
+  what the character looks like.
+- Keep `video_prompt` concise (max ~30 words) and focused on motion, not styling.
 - Do NOT wrap the JSON in backticks. Do NOT add trailing commentary.
 - Scene ids must start at 1 and increase by 1.

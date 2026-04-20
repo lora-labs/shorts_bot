@@ -31,6 +31,15 @@ class Scenario(BaseModel):
 
     title: str = Field(..., min_length=1)
     style: str = Field("cinematic", description="Global visual style keywords")
+    character_sheet: str = Field(
+        "",
+        description=(
+            "Canonical description of the main subject(s) that must remain "
+            "visually consistent across every scene (species, colors, clothing, "
+            "distinguishing marks, etc.). Prepended automatically to every "
+            "scene's image_prompt."
+        ),
+    )
     scenes: list[Scene] = Field(..., min_length=1)
 
     @field_validator("scenes")
