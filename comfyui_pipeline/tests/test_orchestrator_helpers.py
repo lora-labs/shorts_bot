@@ -62,7 +62,7 @@ def test_build_image_workflow_uses_ksampler_advanced(tmp_path) -> None:
     assert "seed" not in sampler["inputs"]
 
 
-def test_build_video_workflow_wires_ltx23_nodes(tmp_path) -> None:
+def test_build_video_workflow_wires_ltx23_av_nodes(tmp_path) -> None:
     cfg = PipelineConfig(
         output_dir=tmp_path,
         ltx_checkpoint="ltx23.safetensors",
@@ -83,27 +83,42 @@ def test_build_video_workflow_wires_ltx23_nodes(tmp_path) -> None:
 
     # Checkpoint, encoder, LoRA wiring
     assert wf[orch._find_node_by_title(wf, "Load LTX checkpoint")]["inputs"]["ckpt_name"] == "ltx23.safetensors"
+    # LTXAVTextEncoderLoader requires BOTH the Gemma encoder file and the
+    # LTX checkpoint (it reads the cross-attention projection weights that
+    # pair Gemma embeddings with the video model).
     enc = wf[orch._find_node_by_title(wf, "LTX text encoder")]
-    assert enc["class_type"] == "CLIPLoader"
-    assert enc["inputs"]["clip_name"] == "gemma3-12b.safetensors"
-    assert enc["inputs"]["type"] == "ltxv"
+    assert enc["class_type"] == "LTXAVTextEncoderLoader"
+    assert enc["inputs"]["text_encoder"] == "gemma3-12b.safetensors"
+    assert enc["inputs"]["ckpt_name"] == "ltx23.safetensors"
+    # Audio VAE loader re-reads the same LTX checkpoint.
+    audio_vae = wf[orch._find_node_by_title(wf, "Load audio VAE")]
+    assert audio_vae["class_type"] == "LTXVAudioVAELoader"
+    assert audio_vae["inputs"]["ckpt_name"] == "ltx23.safetensors"
     lora = wf[orch._find_node_by_title(wf, "Apply LTX distilled LoRA")]
     assert lora["class_type"] == "LoraLoaderModelOnly"
     assert lora["inputs"]["lora_name"] == "ltx23-lora.safetensors"
     assert lora["inputs"]["strength_model"] == 0.7
 
-    # Image load + latent dims. Builtin LTXVImgToVideo owns width/height/length
-    # (the old EmptyLTXVLatentVideo node is gone — the img2video node produces
-    # the latent directly from the keyframe image).
+    # Image load + latent dims. LTX-2.3 AV: width/height/length live on
+    # EmptyLTXVLatentVideo; LTXVImgToVideoConditionOnly takes the image
+    # and the empty latent and emits a conditioned video latent.
     assert wf[orch._find_node_by_title(wf, "Load keyframe image")]["inputs"]["image"] == "uploads/keyframe.png"
-    i2v = wf[orch._find_node_by_title(wf, "LTX img-to-video")]
-    assert i2v["class_type"] == "LTXVImgToVideo"
-    assert i2v["inputs"]["length"] == pipeline._frames_for_duration(3.0)
-    assert i2v["inputs"]["width"] == cfg.video_width
-    assert i2v["inputs"]["height"] == cfg.video_height
+    video_latent = wf[orch._find_node_by_title(wf, "Empty video latent")]
+    assert video_latent["class_type"] == "EmptyLTXVLatentVideo"
+    length = pipeline._frames_for_duration(3.0)
+    assert video_latent["inputs"]["length"] == length
+    assert video_latent["inputs"]["width"] == cfg.video_width
+    assert video_latent["inputs"]["height"] == cfg.video_height
+    i2v = wf[orch._find_node_by_title(wf, "LTX image to video condition")]
+    assert i2v["class_type"] == "LTXVImgToVideoConditionOnly"
+    # Audio branch matches video length + fps (AV sampler enforces this).
+    audio_latent = wf[orch._find_node_by_title(wf, "Empty audio latent")]
+    assert audio_latent["class_type"] == "LTXVEmptyLatentAudio"
+    assert audio_latent["inputs"]["frames_number"] == length
+    assert audio_latent["inputs"]["frame_rate"] == int(round(cfg.video_fps))
 
-    # Sampler stack
-    sampler_adv = wf[orch._find_node_by_title(wf, "Sample video latent")]
+    # Sampler stack consumes the concatenated AV-latent.
+    sampler_adv = wf[orch._find_node_by_title(wf, "Sample AV latent")]
     assert sampler_adv["class_type"] == "SamplerCustomAdvanced"
     assert wf[orch._find_node_by_title(wf, "Random noise")]["inputs"]["noise_seed"] == 42
     assert wf[orch._find_node_by_title(wf, "CFG guider")]["inputs"]["cfg"] == cfg.video_cfg

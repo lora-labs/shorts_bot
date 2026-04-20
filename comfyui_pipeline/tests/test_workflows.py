@@ -59,21 +59,28 @@ def test_scene_image_workflow_uses_ksampler_advanced() -> None:
     )
 
 
-def test_scene_video_workflow_is_ltx_2_3() -> None:
+def test_scene_video_workflow_is_ltx_2_3_av() -> None:
     data = json.loads((WORKFLOW_DIR / "scene_video_api.json").read_text(encoding="utf-8"))
     class_types = {node["class_type"] for node in data.values()}
-    # LTX-2.3 single-stage I2V chain. As of ComfyUI core 0.18+ the builtin
-    # LTXVImgToVideo node subsumes both the old EmptyLTXVLatentVideo and
-    # LTXVImgToVideoConditionOnly nodes (it accepts positive/negative/vae/
-    # image and width/height/length and emits positive/negative/latent in
-    # one shot). The LTX-specific text encoder loader LTXAVTextEncoderLoader
-    # was also dropped; current workflows load the Gemma encoder through the
-    # generic core CLIPLoader with type="ltxv".
+    # LTX-2.3 is an audio-visual model: the sampler consumes a unified
+    # AV-latent (video + audio) and emits one back. The I2V workflow must
+    # therefore fan out into two branches (EmptyLTXVLatentVideo +
+    # LTXVImgToVideoConditionOnly on the video side, LTXVAudioVAELoader +
+    # LTXVEmptyLatentAudio on the audio side) merged by LTXVConcatAVLatent,
+    # and split again after sampling by LTXVSeparateAVLatent. The pure
+    # video-only LTXVImgToVideo node from older LTX-2.0 workflows is NOT
+    # compatible and produces 4-D vs 3-D tensor shape mismatches.
     for expected in (
-        "CLIPLoader",
+        "LTXAVTextEncoderLoader",
+        "LTXVImgToVideoConditionOnly",
+        "EmptyLTXVLatentVideo",
+        "LTXVAudioVAELoader",
+        "LTXVEmptyLatentAudio",
+        "LTXVConcatAVLatent",
+        "LTXVSeparateAVLatent",
         "LTXVConditioning",
-        "LTXVImgToVideo",
         "LTXVScheduler",
+        "LTXVTiledVAEDecode",
         "KSamplerSelect",
         "RandomNoise",
         "CFGGuider",
@@ -82,21 +89,46 @@ def test_scene_video_workflow_is_ltx_2_3() -> None:
         "SaveVideo",
     ):
         assert expected in class_types, f"scene_video_api.json must contain {expected}"
-    # Old LTX-2.0 / removed LTX-2.3 pre-release nodes must be gone.
+    # Reject older topologies that don't work with LTX-2.3 AV model.
     assert "SamplerCustom" not in class_types
-    assert "EmptyLTXVLatentVideo" not in class_types
-    assert "LTXVImgToVideoConditionOnly" not in class_types
-    assert "LTXAVTextEncoderLoader" not in class_types
+    assert "LTXVImgToVideo" not in class_types, (
+        "LTX-2.3 is AV — use LTXVImgToVideoConditionOnly + LTXVConcatAVLatent instead"
+    )
+    assert "CLIPLoader" not in class_types, (
+        "LTX-2.3 needs LTXAVTextEncoderLoader (encoder+ckpt pair), not CLIPLoader"
+    )
 
 
-def test_scene_video_cliploader_uses_ltxv_type() -> None:
-    """The LTX text encoder node must load the Gemma safetensors via
-    CLIPLoader with type="ltxv" — this is what current ComfyUI uses to
-    wire Gemma-3 tokenization + embedding space to LTXVConditioning.
-    Using the wrong type silently produces nonsense embeddings."""
+def test_scene_video_av_text_encoder_pairs_encoder_with_ckpt() -> None:
+    """LTXAVTextEncoderLoader requires BOTH the Gemma encoder file AND the
+    LTX checkpoint (it reads the cross-attention projection weights that
+    pair Gemma embeddings with the video model)."""
     data = json.loads((WORKFLOW_DIR / "scene_video_api.json").read_text(encoding="utf-8"))
-    enc_nodes = [n for n in data.values() if n["class_type"] == "CLIPLoader"]
-    assert len(enc_nodes) == 1, "scene_video must have exactly one CLIPLoader (Gemma)"
+    enc_nodes = [n for n in data.values() if n["class_type"] == "LTXAVTextEncoderLoader"]
+    assert len(enc_nodes) == 1, "scene_video must have exactly one LTXAVTextEncoderLoader"
     enc = enc_nodes[0]
-    assert enc["inputs"].get("type") == "ltxv"
-    assert enc["inputs"].get("clip_name"), "CLIPLoader must name a clip/text-encoder file"
+    assert enc["inputs"].get("text_encoder"), "LTXAVTextEncoderLoader needs text_encoder"
+    assert enc["inputs"].get("ckpt_name"), "LTXAVTextEncoderLoader needs ckpt_name"
+
+
+def test_scene_video_av_latent_fanout_fanin() -> None:
+    """Validate that the AV-latent is the single latent fed into the sampler
+    (topology bug guard): LTXVConcatAVLatent output must feed both the
+    scheduler latent input and the sampler latent_image input."""
+    data = json.loads((WORKFLOW_DIR / "scene_video_api.json").read_text(encoding="utf-8"))
+    concat_id = next(
+        nid for nid, n in data.items() if n["class_type"] == "LTXVConcatAVLatent"
+    )
+    sched_node = next(n for n in data.values() if n["class_type"] == "LTXVScheduler")
+    sampler_node = next(
+        n for n in data.values() if n["class_type"] == "SamplerCustomAdvanced"
+    )
+    assert sched_node["inputs"].get("latent") == [concat_id, 0]
+    assert sampler_node["inputs"].get("latent_image") == [concat_id, 0]
+    sep_node = next(
+        n for n in data.values() if n["class_type"] == "LTXVSeparateAVLatent"
+    )
+    sampler_id = next(
+        nid for nid, n in data.items() if n["class_type"] == "SamplerCustomAdvanced"
+    )
+    assert sep_node["inputs"].get("av_latent") == [sampler_id, 0]
