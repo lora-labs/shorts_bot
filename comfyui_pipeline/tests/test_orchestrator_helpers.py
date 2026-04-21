@@ -741,13 +741,107 @@ def test_negative_prompt_override_is_appended(tmp_path) -> None:
 
 
 def test_negative_override_survives_empty_scene_negative(tmp_path) -> None:
+    # With an empty scene negative the merged prompt must still contain the
+    # baseline anti-morph clause plus the user override. Ordering is
+    # baseline → override (scene slot is empty so it is skipped).
     cfg = PipelineConfig(output_dir=tmp_path, negative_prompt_override="text, hands")
     pipeline = ScenePipeline(cfg)
     scene = Scene(
         id=1, description="x", image_prompt="a cat",
         video_prompt="x", duration_seconds=3.0, negative_prompt="",
     )
-    assert pipeline._compose_negative_prompt(scene) == "text, hands"
+    merged = pipeline._compose_negative_prompt(scene)
+    assert "text, hands" in merged
+    assert "morphing" in merged and "extra limbs" in merged
+    # baseline comes before override when scene negative is empty.
+    assert merged.index("morphing") < merged.index("text, hands")
+
+
+def test_baseline_negative_prompt_is_always_injected(tmp_path) -> None:
+    """The hard-coded anti-morph negatives must land in *every* merged
+    negative prompt — even when both scene and user override are empty.
+    These phrases directly target the LTX 22B distilled failure modes
+    (extra limbs, melted faces) observed on the reference artifact
+    samples.
+    """
+    cfg = PipelineConfig(output_dir=tmp_path)
+    pipeline = ScenePipeline(cfg)
+    scene = Scene(
+        id=1, description="x", image_prompt="a cat",
+        video_prompt="x", duration_seconds=3.0, negative_prompt="",
+    )
+    merged = pipeline._compose_negative_prompt(scene)
+    for token in ("morphing", "extra limbs", "deformed face", "bad anatomy"):
+        assert token in merged, f"missing {token!r} in {merged!r}"
+
+
+def test_baseline_negative_can_be_disabled_via_empty_string(tmp_path) -> None:
+    """Power users who want bespoke negatives can clear the baseline by
+    setting ``baseline_negative_prompt=''``. The merge must then behave
+    like before baseline existed (scene → override)."""
+    cfg = PipelineConfig(
+        output_dir=tmp_path,
+        baseline_negative_prompt="",
+        negative_prompt_override="text, hands",
+    )
+    pipeline = ScenePipeline(cfg)
+    scene = Scene(
+        id=1, description="x", image_prompt="a cat",
+        video_prompt="x", duration_seconds=3.0, negative_prompt="low quality",
+    )
+    assert pipeline._compose_negative_prompt(scene) == "low quality, text, hands"
+
+
+def test_ltx_video_defaults_match_anti_morph_tuning(tmp_path) -> None:
+    """Regression for PR #25. These LTX knobs were tuned after the
+    reference artifact dump (cat-in-kitchen morphing). If someone bumps
+    them without reading the history, tests should fail loudly so the
+    regression is at least called out in review.
+    """
+    cfg = PipelineConfig(output_dir=tmp_path)
+    # Steps: distilled LoRA minimum is ~12, floor visible-artifact was 15,
+    # 24 is the first value that held motion coherent on the sample.
+    assert cfg.video_steps == 24
+    # Baseline must be non-empty or the workflow loses its LTX-specific
+    # anti-morph clause.
+    assert cfg.baseline_negative_prompt.strip()
+
+
+def test_ltx_workflow_json_uses_tuned_tile_overlap_and_last_frame_fix() -> None:
+    """The checked-in ``scene_video_api.json`` must use the tuned
+    LTXVTiledVAEDecode knobs: overlap=32 (was 2, caused visible vertical
+    seams splitting the subject's face) and last_frame_fix=true (was
+    false, caused the clip's final frames to degrade).
+    """
+    import json
+    from pathlib import Path
+
+    wf_path = (
+        Path(__file__).resolve().parent.parent
+        / "workflows" / "scene_video_api.json"
+    )
+    wf = json.loads(wf_path.read_text(encoding="utf-8"))
+    decode_nodes = [
+        n for n in wf.values() if n.get("class_type") == "LTXVTiledVAEDecode"
+    ]
+    assert len(decode_nodes) == 1, "expected exactly one tiled VAE decode"
+    inputs = decode_nodes[0]["inputs"]
+    assert inputs["overlap"] == 32, (
+        f"overlap={inputs['overlap']}: re-read PR #25. Dropping back to a "
+        f"small overlap re-introduces tile seams splitting the subject."
+    )
+    assert inputs["last_frame_fix"] is True, (
+        "last_frame_fix=False degrades the end of each clip — keep it True."
+    )
+
+    # LTXVPreprocess.img_compression was 0 (keyframe preserved but LTX
+    # overfit on its detail, amplifying SDXL artifacts); 4 softens the
+    # input just enough to let motion smooth things out.
+    preprocess_nodes = [
+        n for n in wf.values() if n.get("class_type") == "LTXVPreprocess"
+    ]
+    assert len(preprocess_nodes) == 1
+    assert preprocess_nodes[0]["inputs"]["img_compression"] == 4
 
 
 def test_apply_idea_hints_injects_scene_count_and_duration(tmp_path) -> None:
