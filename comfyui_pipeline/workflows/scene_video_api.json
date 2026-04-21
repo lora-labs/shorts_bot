@@ -47,7 +47,7 @@
     "class_type": "LTXVPreprocess",
     "inputs": {
       "image": ["4", 0],
-      "img_compression": 0
+      "img_compression": 4
     },
     "_meta": { "title": "Preprocess keyframe" }
   },
@@ -107,7 +107,7 @@
   "14": {
     "class_type": "LTXVScheduler",
     "inputs": {
-      "steps": 15,
+      "steps": 24,
       "max_shift": 2.05,
       "base_shift": 0.95,
       "stretch": true,
@@ -161,8 +161,8 @@
       "latents": ["19", 0],
       "horizontal_tiles": 2,
       "vertical_tiles": 2,
-      "overlap": 2,
-      "last_frame_fix": false
+      "overlap": 32,
+      "last_frame_fix": true
     },
     "_meta": { "title": "Decode video latent" }
   },

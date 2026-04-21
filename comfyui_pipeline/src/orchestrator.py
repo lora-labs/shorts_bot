@@ -124,7 +124,13 @@ class PipelineConfig:
 
     image_steps: int = 28
     image_cfg: float = 6.5
-    video_steps: int = 15
+    # 15 steps on LTX distilled gave visibly-morphing motion after
+    # ~1s (extra limbs, face melting, fur striations). Distilled LoRA
+    # is trained to work with low step counts but 15 is the floor;
+    # 24 is the sweet spot where motion stays coherent without
+    # doubling wallclock (LTX 22B fp8 is ~14s/step on 12 GB with
+    # offload, so 15→24 adds ~2 min per scene).
+    video_steps: int = 24
     video_cfg: float = 1.0
 
     # IP-Adapter (cross-scene character consistency). After scene 1 renders
@@ -162,6 +168,26 @@ class PipelineConfig:
     # avoids the "every scene has the same micro-expression" artifact
     # without losing identity (which is locked in the earlier steps).
     ip_adapter_end_at: float = 0.8
+
+    # Hard-coded anti-morph negatives that are appended to *every*
+    # scene's negative prompt (both SDXL and LTX). These are the
+    # artifacts that most consistently wrecked the 22B distilled LTX
+    # runs on reference samples:
+    #   - "morphing / melting / warping" → subject dissolves into
+    #     background mid-motion (seen on the cat sample at ~frame 30)
+    #   - "extra/duplicate/multiple limbs" → limbs fork when the
+    #     subject moves across a VAE tile boundary
+    #   - "deformed / distorted face, multiple heads" → face breaks
+    #     apart into two half-faces near the tile seam
+    #   - "bad anatomy, mutated" → catch-all for limb count errors
+    # Users can still add their own on top via
+    # ``negative_prompt_override`` — both are merged in
+    # ``_compose_negative_prompt``.
+    baseline_negative_prompt: str = (
+        "morphing, melting, warping, extra limbs, duplicate limbs, "
+        "multiple heads, deformed face, distorted anatomy, bad anatomy, "
+        "mutated, disfigured"
+    )
 
     # User-facing overrides applied at orchestration time.
     #
@@ -334,13 +360,19 @@ class ScenePipeline:
         return ", ".join(parts)
 
     def _compose_negative_prompt(self, scene: Scene) -> str:
-        """Merge the scene's scenario-generated negatives with the user's
-        global override (``PipelineConfig.negative_prompt_override``).
-        Both are joined with ``, ``; empty sides are skipped.
+        """Merge the scene's scenario-generated negatives with the
+        pipeline's baseline anti-morph negatives and the user's global
+        override. All three are joined with ``, ``; empty sides are
+        skipped. Order is scene → baseline → override so the per-scene
+        emphasis comes first (some schedulers weight earlier tokens
+        more heavily) but the anti-morph clause is always present.
         """
         parts: list[str] = []
         if scene.negative_prompt and scene.negative_prompt.strip():
             parts.append(scene.negative_prompt.strip())
+        baseline = (self.config.baseline_negative_prompt or "").strip()
+        if baseline:
+            parts.append(baseline)
         override = (self.config.negative_prompt_override or "").strip()
         if override:
             parts.append(override)
