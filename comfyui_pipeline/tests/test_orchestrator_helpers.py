@@ -1,6 +1,7 @@
 """Unit tests for orchestrator helpers that don't require a live ComfyUI."""
 from __future__ import annotations
 
+import dataclasses
 import json
 import subprocess
 from unittest.mock import patch
@@ -842,6 +843,22 @@ def test_ltx_workflow_json_uses_tuned_tile_overlap_and_last_frame_fix() -> None:
     ]
     assert len(preprocess_nodes) == 1
     assert preprocess_nodes[0]["inputs"]["img_compression"] == 4
+
+    # LTXVScheduler.steps must track the tuned default in
+    # ``PipelineConfig.video_steps``. The orchestrator overrides this
+    # at runtime so bot runs are unaffected if the JSON lags, but the
+    # workflow is also usable bare through the ComfyUI UI and must
+    # bake the tuned value in — keeping the two paths in lockstep
+    # avoids "works in bot, artifacts in UI" confusion.
+    scheduler_nodes = [
+        n for n in wf.values() if n.get("class_type") == "LTXVScheduler"
+    ]
+    assert len(scheduler_nodes) == 1
+    default_video_steps = dataclasses.fields(PipelineConfig)
+    video_steps_default = next(
+        f.default for f in default_video_steps if f.name == "video_steps"
+    )
+    assert scheduler_nodes[0]["inputs"]["steps"] == video_steps_default
 
 
 def test_apply_idea_hints_injects_scene_count_and_duration(tmp_path) -> None:

@@ -107,7 +107,7 @@
   "14": {
     "class_type": "LTXVScheduler",
     "inputs": {
-      "steps": 15,
+      "steps": 24,
       "max_shift": 2.05,
       "base_shift": 0.95,
       "stretch": true,
