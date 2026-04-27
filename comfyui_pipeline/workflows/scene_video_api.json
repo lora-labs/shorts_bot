@@ -161,7 +161,7 @@
       "latents": ["19", 0],
       "horizontal_tiles": 2,
       "vertical_tiles": 2,
-      "overlap": 32,
+      "overlap": 8,
       "last_frame_fix": true
     },
     "_meta": { "title": "Decode video latent" }

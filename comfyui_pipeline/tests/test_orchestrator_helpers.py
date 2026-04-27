@@ -827,9 +827,15 @@ def test_ltx_workflow_json_uses_tuned_tile_overlap_and_last_frame_fix() -> None:
     ]
     assert len(decode_nodes) == 1, "expected exactly one tiled VAE decode"
     inputs = decode_nodes[0]["inputs"]
-    assert inputs["overlap"] == 32, (
-        f"overlap={inputs['overlap']}: re-read PR #25. Dropping back to a "
-        f"small overlap re-introduces tile seams splitting the subject."
+    # The installed LTXVTiledVAEDecode node clamps `overlap` at max=8
+    # (validation error: "Value 32 bigger than max of 8"). PR #25
+    # initially set 32 hoping for stronger seam-blending — that was
+    # rejected by the node's schema at runtime. 8 is the node's hard
+    # ceiling and still 4× the previous default of 2, which is enough
+    # to remove the visible vertical seam on the cat sample.
+    assert inputs["overlap"] == 8, (
+        f"overlap={inputs['overlap']}: node max is 8, anything above "
+        f"is rejected; anything below 8 risks re-introducing tile seams."
     )
     assert inputs["last_frame_fix"] is True, (
         "last_frame_fix=False degrades the end of each clip — keep it True."
