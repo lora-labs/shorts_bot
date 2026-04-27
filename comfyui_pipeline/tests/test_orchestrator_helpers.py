@@ -317,6 +317,38 @@ def test_build_script_workflow_round_trips(tmp_path) -> None:
     json.dumps(wf)
 
 
+def test_queue_prompt_surfaces_validation_body_on_400() -> None:
+    """HTTP 400 from ComfyUI /prompt must include the body (which points at
+    the offending node) in the raised exception, otherwise the CLI just sees
+    a bare HTTPError and users have no idea which node ComfyUI rejected."""
+    import pytest
+
+    from comfyui_pipeline.src.comfy_client import ComfyClient
+
+    class _FakeResp:
+        ok = False
+        status_code = 400
+
+        def json(self) -> dict:
+            return {
+                "type": "missing_node_type",
+                "message": "Node 'LTX img-to-video' not found.",
+                "extra_info": {"class_type": "LTXVImgToVideoConditionOnly"},
+            }
+
+        @property
+        def text(self) -> str:
+            return '{"type": "missing_node_type"}'
+
+    client = ComfyClient("http://example.invalid")
+    with patch("requests.post", return_value=_FakeResp()):
+        with pytest.raises(RuntimeError) as excinfo:
+            client.queue_prompt({"1": {"class_type": "X", "inputs": {}}})
+    msg = str(excinfo.value)
+    assert "400" in msg
+    assert "LTXVImgToVideoConditionOnly" in msg
+
+
 def test_qwen_node_forces_local_files_only_for_local_paths(tmp_path) -> None:
     """If ``model_name_or_path`` points at a real on-disk directory, the
     Qwen node must pass ``local_files_only=True`` to transformers so it
